@@ -1,0 +1,48 @@
+{
+  "status": "passed",
+  "scope": "V3 adapter engineering acceptance, not formal training or benchmark quality",
+  "environment": {
+    "python": "D:/Anaconda/envs/dianyun/python.exe",
+    "torch": "2.5.1+cu121",
+    "gpu": "NVIDIA GeForce RTX 4070 Laptop GPU",
+    "dependencies": "D:/dkwork/scdata/network_adaptation/deps"
+  },
+  "checks": {
+    "source_AST": "passed",
+    "protocol_unit_tests": 4,
+    "actual_V3_splits_read": [
+      "train",
+      "validation",
+      "pu1k_patch",
+      "modelnet40_patch",
+      "pu1k_object",
+      "official"
+    ],
+    "all_models_GPU_forward_backward_optimizer_step": "passed",
+    "all_models_patch_256_to_1024": "passed",
+    "all_models_object_2048_to_8192": "passed",
+    "pufmpp_stages_s1_and_s2": "passed",
+    "pufmpp_schedule_debug_calibration": "passed",
+    "SPU_persistent_data_workers": 2,
+    "SPU_checkpoint_resume_epoch_0_to_1": "passed",
+    "prediction_NPZ_ID_pairing": "passed",
+    "common_evaluator_and_exact_P2F": "passed (2 debug samples, 1 object)",
+    "OUNet_no_clipping_scan": {
+      "records": 750,
+      "model_gt_max_abs": 1.2367854118347168,
+      "fixed_scale": 0.5
+    }
+  },
+  "not_completed": [
+    "formal long training",
+    "model quality comparison",
+    "full dataset benchmark",
+    "convergence or optimal hyperparameter verification"
+  ],
+  "implementation_variants": [
+    "Hungarian squared-distance transport replaces original approximate EMD extensions",
+    "OUNet budgeted confidence-ranked leaf splitting",
+    "SPU remains input-only self-supervised",
+    "PUFM++ requires calibrated train schedule or explicitly labelled uniform-time ablation"
+  ]
+}

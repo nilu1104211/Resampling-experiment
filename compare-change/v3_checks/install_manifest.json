@@ -1,0 +1,116 @@
+[
+  {
+    "path": "Enhanced_PUFM-main/models/rin.py",
+    "sha256": "9e4bddca7e216f9b820cafa689ae35695a840e0c78f1ba6124cff217f7bdf658",
+    "expected_original_sha256": "0d62992bca7fad690bde5cabacaa11fd38facbd715219a59d698a74ddf298f0d",
+    "bytes": 15189
+  },
+  {
+    "path": "Enhanced_PUFM-main/v3.py",
+    "sha256": "8719fcf3c7743dfac7a89234a962c569e39be51b4ce2e951a1e6c42dffb7592a",
+    "expected_original_sha256": null,
+    "bytes": 270
+  },
+  {
+    "path": "Enhanced_PUFM-main/v3_adapter.py",
+    "sha256": "9c6ba5f2e642ca6526379eea00df878898c0d0f84abb4be71fb53df2310befae",
+    "expected_original_sha256": null,
+    "bytes": 6371
+  },
+  {
+    "path": "requirements_v3.txt",
+    "sha256": "3810d75fd1b24236167c73751be6f0228b4e625de31a437b290b83f76e14e779",
+    "expected_original_sha256": null,
+    "bytes": 337
+  },
+  {
+    "path": "run_v3.ps1",
+    "sha256": "4ef924daffa04b79a99309f99991a9f97a42858a523f346489c261ef819a57ff",
+    "expected_original_sha256": null,
+    "bytes": 995
+  },
+  {
+    "path": "spu-imr-main/model4spu_imr.py",
+    "sha256": "728bee48ffae1d1063e1348c21d9582f2e4bf84792590290c859fc17c7dbb355",
+    "expected_original_sha256": "73cd77b4357453b9c57c4dabd6b247b4a74c45b4d1404f38b437e5806576795f",
+    "bytes": 17471
+  },
+  {
+    "path": "spu-imr-main/tools/utils.py",
+    "sha256": "942ac24cbb78779881700bffe54793d4147da210eb4b050069b22560a9b7bc58",
+    "expected_original_sha256": "db861adb4b9f160904279671405b5fbe20afe772ac92a16c7834638bb58fca3a",
+    "bytes": 7553
+  },
+  {
+    "path": "spu-imr-main/v3.py",
+    "sha256": "b99b51ff548ad0bce7b45bef4d514f3c8b74cefd6ce753458fde897bdad845e4",
+    "expected_original_sha256": null,
+    "bytes": 271
+  },
+  {
+    "path": "spu-imr-main/v3_adapter.py",
+    "sha256": "b48b2f514bb3e14beff4a2290615c67b1cb0b8dc17c1a691c02d082fc9e1f729",
+    "expected_original_sha256": null,
+    "bytes": 3404
+  },
+  {
+    "path": "test_v3_adaptation.py",
+    "sha256": "5538d1bc03bf4d07a3407325fcc323100ec7584e6185b578aabc7b37531e2a00",
+    "expected_original_sha256": null,
+    "bytes": 1808
+  },
+  {
+    "path": "upsample-clean-master/v3.py",
+    "sha256": "894160fea2e9647dfede55972ef99d6e461dac44fbc88a112683f3ac4f088cff",
+    "expected_original_sha256": null,
+    "bytes": 269
+  },
+  {
+    "path": "upsample-clean-master/v3_adapter.py",
+    "sha256": "d4a6b45a77efd588f318581e84971b55425441bed752c31251e95e00a6fcb5f2",
+    "expected_original_sha256": null,
+    "bytes": 5770
+  },
+  {
+    "path": "V3_ADAPTATION.md",
+    "sha256": "15a4d074f244e5cf6689f008fc0c94e256e0dd14d5f184c004590e876dbe0381",
+    "expected_original_sha256": null,
+    "bytes": 8179
+  },
+  {
+    "path": "v3_checks/acceptance.json",
+    "sha256": "7d484d50528dd4ed78ce0068b546351f16539b95fbb45be2c891141744881ba7",
+    "expected_original_sha256": null,
+    "bytes": 1694
+  },
+  {
+    "path": "v3_checks/ounet_smoke.json",
+    "sha256": "6d9fa63ea6b345e5fc69dadbedada2e0182be5288088b091e7144309c9fe7eaa",
+    "expected_original_sha256": null,
+    "bytes": 560
+  },
+  {
+    "path": "v3_checks/pufmpp_s2_object_smoke.json",
+    "sha256": "151f7704ad84b3e7064b1bf54702b16058f133f8653b49e1b18587d79ce3d7cc",
+    "expected_original_sha256": null,
+    "bytes": 528
+  },
+  {
+    "path": "v3_checks/pufmpp_smoke.json",
+    "sha256": "75581778ae6da1c7ef87573f3609015740ada563239e267f3088f84b50c0e3e8",
+    "expected_original_sha256": null,
+    "bytes": 490
+  },
+  {
+    "path": "v3_checks/spu_object_smoke.json",
+    "sha256": "f983e695b36495d6d7777613e61c2bd8cd9bd0ce02eca363f05f9ff4862e69ca",
+    "expected_original_sha256": null,
+    "bytes": 537
+  },
+  {
+    "path": "v3_common.py",
+    "sha256": "eedde4a6af129f0c470f3f08cef23e43eec758ea7b3fd57434d5d07a8c1f41fc",
+    "expected_original_sha256": null,
+    "bytes": 20058
+  }
+]

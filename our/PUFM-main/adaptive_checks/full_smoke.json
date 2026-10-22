@@ -1,0 +1,34 @@
+{
+  "status": "passed",
+  "random_weights_smoke_only": true,
+  "loss": 1.5710039138793945,
+  "gradient_l1": {
+    "flow": 1840.5235097578307,
+    "rgr": 2.7483493462204933,
+    "gain": 3.3775848150253296,
+    "conditioner": 0.10714955174626084
+  },
+  "input_points": 256,
+  "prediction_points": 1024,
+  "teacher_improvement": 4.903227090835571e-05,
+  "configuration": {
+    "backbone": "pufm_w_attn",
+    "use_rgr": true,
+    "use_virtual": true,
+    "allocation": "gain",
+    "gain_form": "monotone",
+    "condition": true,
+    "regions": 32,
+    "minimum": 4,
+    "capacity": 64,
+    "swap_step": 8,
+    "swap_iterations": 32,
+    "flow_steps": 5,
+    "max_offset_spacing": 2.0,
+    "teacher_gain_scale": 1000.0
+  },
+  "density_TV": [
+    0.076171875
+  ],
+  "object_prediction_points": 8192
+}

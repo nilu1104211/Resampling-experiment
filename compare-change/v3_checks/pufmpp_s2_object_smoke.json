@@ -1,0 +1,13 @@
+{
+  "status": "passed",
+  "model": "pufm++",
+  "device": "cuda",
+  "loss": 0.6003364324569702,
+  "gradient_parameters": 643,
+  "input_points": 256,
+  "prediction_points": 1024,
+  "training": "PUFM++ RIN; s1 transport-aligned FM, s2 t=0 Chamfer fine-tuning; exact Hungarian transport backend; actual V3 input",
+  "inference": "KNN midpoint+FPS; RIN Euler integration; input-only patch normalization; 4x; optional saved schedule/manifold step",
+  "random_weights_smoke_only": true,
+  "object_prediction_points": 8192
+}

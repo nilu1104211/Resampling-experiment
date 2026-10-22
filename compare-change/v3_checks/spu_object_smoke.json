@@ -1,0 +1,13 @@
+{
+  "status": "passed",
+  "model": "spu-imr",
+  "device": "cuda",
+  "loss": 2.6269001960754395,
+  "gradient_parameters": 304,
+  "input_points": 256,
+  "prediction_points": 1024,
+  "training": "Original SPU-IMR iterative masked recovery on actual input only (including its degradation); no clean GT loss; exact transport backend",
+  "inference": "Repeated native masked recovery; source density filter; FPS to 4x; normalized input patches for objects",
+  "random_weights_smoke_only": true,
+  "object_prediction_points": 8192
+}

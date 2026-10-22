@@ -1,0 +1,116 @@
+[
+  {
+    "path": "adaptive_checks/acceptance.json",
+    "sha256": "821716b45d6e895b7909d8e2135e634637e600ba65d0f268faf3f7f4d0794446",
+    "expected_original_sha256": null,
+    "bytes": 2265
+  },
+  {
+    "path": "adaptive_checks/full_smoke.json",
+    "sha256": "a11615c92faa6cf4326042bddb16a4c1c2368e8e6a8cb0fba1caea77f0b5c7db",
+    "expected_original_sha256": null,
+    "bytes": 827
+  },
+  {
+    "path": "adaptive_v3.py",
+    "sha256": "32f1a4b8aebff36fe044698ff3f811c3774aaa1608cdda02095b6fe183d02456",
+    "expected_original_sha256": null,
+    "bytes": 26769
+  },
+  {
+    "path": "configs/ablation_presets.json",
+    "sha256": "f91cf7155dc471a2d67fd2180d85fb3706b2ad366b8fb189a1947258eaa72a5e",
+    "expected_original_sha256": null,
+    "bytes": 3762
+  },
+  {
+    "path": "eval_adaptive.py",
+    "sha256": "7032ac05ec381f3677132a67c0b6ca31307fdd5d3e88a172e523be93004f21fa",
+    "expected_original_sha256": null,
+    "bytes": 311
+  },
+  {
+    "path": "gain_teacher.py",
+    "sha256": "e5467b4c057094eab93d04730ccc69b31be2bb128b044ce3807c9a389bfd42e6",
+    "expected_original_sha256": null,
+    "bytes": 6848
+  },
+  {
+    "path": "models/adaptive_losses.py",
+    "sha256": "8d0fde05b9ba2ea071bc0fdda3c0c18bd889b3964f2463fe2d5446fac1b8b015",
+    "expected_original_sha256": null,
+    "bytes": 4592
+  },
+  {
+    "path": "models/adaptive_ops.py",
+    "sha256": "c76d18dd2a7fc8c69897b0af7d8e488ec44366be110ed8b74410696c3347b518",
+    "expected_original_sha256": null,
+    "bytes": 2886
+  },
+  {
+    "path": "models/adaptive_wrapper.py",
+    "sha256": "6e6d93a78b82be46c2052290932978ee97a8b3adf8bb27f4e471e24b0d89e211",
+    "expected_original_sha256": null,
+    "bytes": 9568
+  },
+  {
+    "path": "models/budget_allocator.py",
+    "sha256": "2c09df98f2b6c90c81308766c744ade6ce4a41ab4d77b92455574e16d86ba69c",
+    "expected_original_sha256": null,
+    "bytes": 6986
+  },
+  {
+    "path": "models/marginal_gain.py",
+    "sha256": "84e38db6d384eb3dadc5c4d3d688c263662515198f157ea74c1a5a324b883bae",
+    "expected_original_sha256": null,
+    "bytes": 1513
+  },
+  {
+    "path": "models/pointnet2_util.py",
+    "sha256": "fbc9efab9d4da9c3174557869660321f45c1f4dee5c7fc515ba44d2943d7f795",
+    "expected_original_sha256": "523ee80fedd87b232943d09adafa2e5c7fa2b91528074040fb077b76bf40a45c",
+    "bytes": 26532
+  },
+  {
+    "path": "models/pointops_compat.py",
+    "sha256": "0e0ff745def457d06beb0d311f1d129c623d419e97fba8a8c1b8a0011356f50f",
+    "expected_original_sha256": null,
+    "bytes": 1943
+  },
+  {
+    "path": "models/rgr_v2.py",
+    "sha256": "d4ab1ac51340a625f8ca39129592fe91306c946bd7f2fb73183d4977fd4fc471",
+    "expected_original_sha256": null,
+    "bytes": 2949
+  },
+  {
+    "path": "models/utils.py",
+    "sha256": "b31937cc1144d8b71849f19ff2f02546ffc760bfc7d66272c016fbbc2f9fdaaf",
+    "expected_original_sha256": "8c99bb3b9192fdced550dbe5194987965d6f536967c5e223af718a13bb4f56c9",
+    "bytes": 8481
+  },
+  {
+    "path": "NOVELTY_REVIEW.md",
+    "sha256": "5127e510ea5647de18075262803110dda0d5a21c25db9e14a77bd9ef18955861",
+    "expected_original_sha256": null,
+    "bytes": 6148
+  },
+  {
+    "path": "README_ADAPTIVE_V2.md",
+    "sha256": "ff55d4edae4d3778b510094c0cb26887c3e1426f107f4afe6eea70e207f2f59a",
+    "expected_original_sha256": null,
+    "bytes": 10571
+  },
+  {
+    "path": "run_adaptive.ps1",
+    "sha256": "dfdd2a1189a9b1a25ff26f9b9392426b8ca2ea4b1ba88be3ab699ec8a7b0f25f",
+    "expected_original_sha256": null,
+    "bytes": 381
+  },
+  {
+    "path": "tests/test_adaptive_contract.py",
+    "sha256": "bc4618de928a8f6d2f281e4beb416bc798cf25e4c74955beb6a1fbc89ee61580",
+    "expected_original_sha256": null,
+    "bytes": 3311
+  }
+]

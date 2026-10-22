@@ -1,0 +1,13 @@
+{
+  "status": "passed",
+  "model": "ounet",
+  "device": "cuda",
+  "loss": 5.269364833831787,
+  "gradient_parameters": 331,
+  "input_points": 256,
+  "prediction_points": 1024,
+  "training": "Native OUNet occupancy cross-entropy + local displacement regression; common V3 input/clean GT; fixed input-only scale, no clipping",
+  "inference": "OUNet with budget-constrained confidence-ranked leaf splitting; exactly M leaves; ancestor beam disclosed; no repeated-point padding",
+  "random_weights_smoke_only": true,
+  "object_prediction_points": 8192
+}
