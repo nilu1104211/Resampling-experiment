@@ -12,9 +12,9 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-CODE_ROOT = Path(os.environ.get("V3_CODE_ROOT", "D:/dkwork/scdata"))
+CODE_ROOT = Path(os.environ.get("V3_CODE_ROOT", Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(CODE_ROOT))
-from adaptive_resampling.v3_dataset import AdaptiveResamplingDataset, EpochSampler, OfficialPU1KDataset
+from adaptive_resampling.v3_dataset import DEFAULT_ROOT, AdaptiveResamplingDataset, EpochSampler, OfficialPU1KDataset
 from models.adaptive_wrapper import AdaptivePUFM, AdaptiveConfig
 from models.adaptive_losses import flow_loss, recovery_losses, gain_loss, retention_loss
 from models.adaptive_ops import cd_l1
@@ -422,7 +422,7 @@ def main():
     parser.add_argument("--preset", choices=["baseline", "rgr", "rule", "static", "mgb", "rgr_static", "full", "full_condition"])
     parser.add_argument("--backbone", choices=["pufm", "pufm_w_attn"])
     parser.add_argument("--stage", choices=["baseline", "rgr", "joint"], default="baseline")
-    parser.add_argument("--root", default="D:/dkwork/scdata/adaptive_resampling_data_v3")
+    parser.add_argument("--root", default=str(DEFAULT_ROOT))
     parser.add_argument("--split", default="train", choices=["train", "validation", "pu1k_patch", "pu1k_object", "modelnet40_patch", "official"])
     parser.add_argument("--condition")
     parser.add_argument("--training-mode", choices=["mixed", "clean"], default="mixed")

@@ -4,5 +4,5 @@ import os
 import runpy
 
 if __name__ == "__main__":
-    root = Path(os.environ.get("V3_CODE_ROOT", "D:/dkwork/scdata"))
+    root = Path(os.environ.get("V3_CODE_ROOT", Path(__file__).resolve().parents[2]))
     runpy.run_path(str(root / "tools/evaluate_v3_predictions.py"), run_name="__main__")

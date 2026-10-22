@@ -14,7 +14,7 @@ import torch
 
 
 def bootstrap():
-    code = Path(os.environ.get("V3_CODE_ROOT", "D:/dkwork/scdata"))
+    code = Path(os.environ.get("V3_CODE_ROOT", Path(__file__).resolve().parents[2]))
     if not (code / "adaptive_resampling/v3_dataset.py").is_file():
         raise FileNotFoundError("Set V3_CODE_ROOT to the directory containing adaptive_resampling")
     sys.path.insert(0, str(code))
@@ -22,7 +22,7 @@ def bootstrap():
 
 
 bootstrap()
-from adaptive_resampling.v3_dataset import AdaptiveResamplingDataset, EpochSampler, OfficialPU1KDataset
+from adaptive_resampling.v3_dataset import DEFAULT_ROOT, AdaptiveResamplingDataset, EpochSampler, OfficialPU1KDataset
 
 
 def set_seed(value):
@@ -342,7 +342,7 @@ def smoke(adapter, args):
 def main(folder, model_name):
     parser = argparse.ArgumentParser(description=f"{model_name}: V3 train/predict/check/smoke")
     parser.add_argument("command", choices=["check-data", "smoke", "train", "predict", "schedule"])
-    parser.add_argument("--root", default="D:/dkwork/scdata/adaptive_resampling_data_v3")
+    parser.add_argument("--root", default=str(DEFAULT_ROOT))
     parser.add_argument("--training-mode", choices=["mixed", "clean"], default="mixed")
     parser.add_argument("--split", choices=["validation", "pu1k_patch", "modelnet40_patch", "pu1k_object", "official"], default="pu1k_patch")
     parser.add_argument("--condition", default=None)

@@ -1,0 +1,42 @@
+# V3 server experiment files
+# Generated Python/native build files
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.dll
+*.o
+*.obj
+build/
+dist/
+*.egg-info/
+
+# Datasets and archives are transferred separately
+/data/
+/adaptive_resampling_data_v3/
+/adaptive_resampling_data/
+*.h5
+*.hdf5
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# New experiment checkpoints and outputs
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
+*.log
+/server_runs/
+/outputs/
+v3_runs/
+adaptive_runs/
+adaptive_predictions/
+adaptive_evaluation/
+
+# Desktop files
+.DS_Store
+Thumbs.db

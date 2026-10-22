@@ -1,0 +1,41 @@
+{
+  "records_per_runtime": 80,
+  "epochs": 5,
+  "base_patches": 16,
+  "worker0_worker2_identical": true,
+  "per_field": {
+    "input_xyz": {
+      "exact_match": false,
+      "max_abs_diff": 1.1920928955078125e-07
+    },
+    "gt_xyz": {
+      "exact_match": false,
+      "max_abs_diff": 1.7881393432617188e-07
+    },
+    "prediction_center": {
+      "exact_match": true,
+      "max_abs_diff": 0.0
+    },
+    "prediction_scale": {
+      "exact_match": true,
+      "max_abs_diff": 0.0
+    },
+    "prediction_rotation": {
+      "exact_match": true,
+      "max_abs_diff": 0.0
+    },
+    "raw_input_xyz": {
+      "exact_match": true,
+      "max_abs_diff": 0.0
+    },
+    "selected_pool_index": {
+      "exact_match": true,
+      "max_abs_diff": 0.0
+    },
+    "region_spec": {
+      "exact_match": true,
+      "max_abs_diff": null
+    }
+  },
+  "status": "passed_with_cross_runtime_roundoff"
+}
