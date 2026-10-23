@@ -1,5 +1,6 @@
 """Portable B,N,C point operations; no ground truth or runtime extension builds."""
 import torch
+from adaptive_resampling.v3_transport import assignment_indices
 
 
 def gather(points, ids):
@@ -55,14 +56,7 @@ def cd_l1(prediction, target):
 
 def aligned_target(source, target):
     """Exact matching backend. Only call inside training / teacher construction."""
-    import numpy as np
-    from scipy.optimize import linear_sum_assignment
-    if source.shape != target.shape:
-        raise ValueError("Transport requires equal cardinality")
-    with torch.no_grad():
-        cost = torch.cdist(source.detach(), target.detach()).square().cpu().numpy()
-        ids = torch.as_tensor(np.stack([linear_sum_assignment(c)[1] for c in cost]), device=target.device)
-    return gather(target, ids)
+    return gather(target, assignment_indices(source, target))
 
 
 def region_counts(points, centers):

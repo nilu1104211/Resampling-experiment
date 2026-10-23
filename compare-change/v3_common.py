@@ -23,6 +23,9 @@ def bootstrap():
 
 bootstrap()
 from adaptive_resampling.v3_dataset import DEFAULT_ROOT, AdaptiveResamplingDataset, EpochSampler, OfficialPU1KDataset
+from adaptive_resampling.v3_transport import assignment_indices, configure_assignment_workers
+from adaptive_resampling.v3_optimizer import make_optimizer, load_optimizer_state
+from adaptive_resampling.v3_training import DEFAULT_TRAIN_PATCHES_PER_OBJECT, require_training_profile
 
 
 def set_seed(value):
@@ -81,14 +84,7 @@ def chamfer(prediction, target):
 
 def assignment_target(source, target):
     """Exact equal-cardinality transport; GT is used only inside training losses."""
-    from scipy.optimize import linear_sum_assignment
-    if source.shape != target.shape:
-        raise ValueError("Transport alignment requires identical point counts")
-    with torch.no_grad():
-        cost = torch.cdist(source.detach(), target.detach()).square().cpu().numpy()
-        ids = np.stack([linear_sum_assignment(c)[1] for c in cost])
-        ids = torch.as_tensor(ids, device=target.device)
-    return index_points(target, ids)
+    return index_points(target, assignment_indices(source, target))
 
 
 def transport_loss(prediction, target):
@@ -134,6 +130,7 @@ def dataset(args, split, *, supervision=False):
         args.root, split, condition=None if split == "train" else args.condition,
         training_mode=args.training_mode, include_supervision=supervision,
         augment_rotation=split == "train",
+        train_patches_per_object=getattr(args, "train_patches_per_object", DEFAULT_TRAIN_PATCHES_PER_OBJECT),
     )
 
 
@@ -189,19 +186,23 @@ def check_data(args):
 def train(adapter, args):
     from torch.utils.data import DataLoader
     ds = dataset(args, "train")
+    args.training_profile = ds.training_profile
+    print(json.dumps({"training_profile": ds.training_profile}), flush=True)
     sampler = EpochSampler(ds)
     loader = DataLoader(ds, batch_size=args.batch_size, sampler=sampler, num_workers=args.workers,
                         persistent_workers=args.workers > 0, drop_last=False)
-    optimizer = torch.optim.AdamW(adapter.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = make_optimizer(torch.optim.AdamW, adapter.parameters(), lr=args.lr,
+                               weight_decay=args.weight_decay, fused=args.fused_optimizer)
     start = 0
     if args.resume:
         saved = load_weights(adapter, args.resume, args, resume=True)
         if saved.get("protocol") != "V3":
             raise ValueError("Resume requires a V3 training checkpoint")
+        require_training_profile(saved, ds.training_profile)
         for key in ["training_mode"] + (["stage"] if args.model_name == "pufm++" else []):
             if saved.get("args", {}).get(key) != getattr(args, key):
                 raise ValueError(f"Resume cannot change {key}; use --checkpoint for a new fine-tuning stage")
-        optimizer.load_state_dict(saved["optimizer"])
+        load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer)
         start = saved["epoch"] + 1
         if "rng" in saved:
             random.setstate(saved["rng"]["python"])
@@ -244,7 +245,8 @@ def train(adapter, args):
                     scores.append(chamfer(adapter.predict(x, 1024), g).item())
             val.close()
             result["validation_cd_model_coordinates"] = float(np.mean(scores))
-        torch.save({"protocol": "V3", "model": adapter.state_dict(), "optimizer": optimizer.state_dict(),
+        torch.save({"protocol": "V3", "training_profile": ds.training_profile,
+                    "model": adapter.state_dict(), "optimizer": optimizer.state_dict(),
                     "epoch": epoch, "args": vars(args), "training": adapter.training_description,
                     "rng": {"python": random.getstate(), "numpy": np.random.get_state(),
                             "torch": torch.get_rng_state(),
@@ -307,7 +309,7 @@ def smoke(adapter, args):
     s = ds[0]
     x = torch.from_numpy(s["input_xyz"])[None].to(args.device)
     gt = torch.from_numpy(s["gt_xyz"])[None].to(args.device)
-    optimizer = torch.optim.Adam(adapter.parameters(), lr=args.lr)
+    optimizer = make_optimizer(torch.optim.Adam, adapter.parameters(), lr=args.lr, fused=args.fused_optimizer)
     adapter.train()
     optimizer.zero_grad(set_to_none=True)
     loss = adapter.training_loss(x, gt)
@@ -344,12 +346,18 @@ def main(folder, model_name):
     parser.add_argument("command", choices=["check-data", "smoke", "train", "predict", "schedule"])
     parser.add_argument("--root", default=str(DEFAULT_ROOT))
     parser.add_argument("--training-mode", choices=["mixed", "clean"], default="mixed")
+    parser.add_argument("--train-patches-per-object", type=int, default=DEFAULT_TRAIN_PATCHES_PER_OBJECT,
+                        help="Fixed shared patches per training object (default: 32; 0: all stored patches)")
     parser.add_argument("--split", choices=["validation", "pu1k_patch", "modelnet40_patch", "pu1k_object", "official"], default="pu1k_patch")
     parser.add_argument("--condition", default=None)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=21)
     parser.add_argument("--batch-size", type=int, default=1 if model_name == "pufm++" else 2)
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--assignment-workers", type=int, default=1,
+                        help="Parallel exact CPU matching within a batch; independent of --workers")
+    parser.add_argument("--fused-optimizer", action="store_true",
+                        help="Use CUDA fused AdamW/Adam updates (optional floating-point rounding differences)")
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--lr", type=float, default=1e-4 if model_name == "pufm++" else 1e-3 if model_name == "spu-imr" else 5e-4)
     parser.add_argument("--weight-decay", type=float, default=0 if model_name == "pufm++" else .05)
@@ -383,6 +391,11 @@ def main(folder, model_name):
         parser.error("predict --output must end with .npz")
     if args.epochs < 1 or args.batch_size < 1 or args.workers < 0 or args.flow_steps < 1 or args.spu_passes < 1:
         parser.error("Epochs, batch size, inference steps and passes must be positive")
+    if args.assignment_workers < 1:
+        parser.error("--assignment-workers must be positive")
+    if args.train_patches_per_object < 0:
+        parser.error("--train-patches-per-object must be nonnegative")
+    configure_assignment_workers(args.assignment_workers)
     set_seed(args.seed)
     if args.command == "check-data":
         result = check_data(args)

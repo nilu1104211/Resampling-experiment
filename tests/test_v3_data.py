@@ -138,6 +138,11 @@ class V3DatasetTests(unittest.TestCase):
         self.assertNotIn("supervision", first)
         np.testing.assert_array_equal(first["input_xyz"], second["input_xyz"])
         self.assertEqual(first["condition"], "C2_hole_10")
+        full = AdaptiveResamplingDataset(self.root, "validation", condition="C2_hole_10", train_patches_per_object=0)
+        self.assertEqual(len(full), len(dataset))
+        np.testing.assert_array_equal(full[0]["input_xyz"], first["input_xyz"])
+        np.testing.assert_array_equal(full[0]["gt_xyz"], first["gt_xyz"])
+        full.close()
         dataset.close()
 
     def test_cached_files_are_not_pickled_into_workers(self):

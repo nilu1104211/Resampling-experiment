@@ -79,6 +79,7 @@ class Adapter(nn.Module):
     def calibrate_schedule(self, ds, args):
         from torch.utils.data import DataLoader
         from adaptive_resampling.v3_dataset import EpochSampler
+        args.training_profile = ds.training_profile
         self.eval()
         sampler = EpochSampler(ds, shuffle=False)
         sampler.set_epoch(0)

@@ -15,6 +15,9 @@ from torch.utils.data import DataLoader
 CODE_ROOT = Path(os.environ.get("V3_CODE_ROOT", Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(CODE_ROOT))
 from adaptive_resampling.v3_dataset import DEFAULT_ROOT, AdaptiveResamplingDataset, EpochSampler, OfficialPU1KDataset
+from adaptive_resampling.v3_transport import configure_assignment_workers
+from adaptive_resampling.v3_optimizer import make_optimizer, load_optimizer_state
+from adaptive_resampling.v3_training import DEFAULT_TRAIN_PATCHES_PER_OBJECT, require_training_profile
 from models.adaptive_wrapper import AdaptivePUFM, AdaptiveConfig
 from models.adaptive_losses import flow_loss, recovery_losses, gain_loss, retention_loss
 from models.adaptive_ops import cd_l1
@@ -38,7 +41,8 @@ def dataset(args, split, supervision=False):
         return OfficialPU1KDataset(args.root)
     return AdaptiveResamplingDataset(args.root, split, condition=None if split == "train" else args.condition,
                                      training_mode=args.training_mode, include_supervision=supervision,
-                                     augment_rotation=split == "train")
+                                     augment_rotation=split == "train",
+                                     train_patches_per_object=getattr(args, "train_patches_per_object", DEFAULT_TRAIN_PATCHES_PER_OBJECT))
 
 
 def seed_all(seed):
@@ -105,6 +109,7 @@ def tensor_batch(batch, device):
 
 def save_checkpoint(path, model, optimizer, epoch, args, stages, debug=False):
     torch.save({"protocol": "V3", "configuration": asdict(model.config), "model": model.state_dict(),
+                "training_profile": args.training_profile,
                 "optimizer": optimizer.state_dict(), "epoch": epoch, "stage": args.stage,
                 "trained_stages": stages, "args": vars(args), "partial_debug_run": debug,
                 "rng": {"torch": torch.get_rng_state(), "numpy": np.random.get_state(), "python": random.getstate(),
@@ -127,16 +132,20 @@ def train(model, saved, args):
         for parameter in module.parameters():
             parameter.requires_grad_(True)
     ds = dataset(args, "train", supervision=model.config.use_rgr)
+    args.training_profile = ds.training_profile
+    print(json.dumps({"training_profile": ds.training_profile}), flush=True)
     sampler = EpochSampler(ds)
     loader = DataLoader(ds, sampler=sampler, batch_size=args.batch_size, num_workers=args.workers,
                         persistent_workers=args.workers > 0)
-    optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
+    optimizer = make_optimizer(torch.optim.Adam, [p for p in model.parameters() if p.requires_grad],
+                               lr=args.lr, fused=args.fused_optimizer)
     start = 0
     stages = list(saved.get("trained_stages", [])) if saved else []
     if args.resume:
         if saved.get("args", {}).get("training_mode") != args.training_mode:
             raise ValueError("Resume cannot change the training data mode")
-        optimizer.load_state_dict(saved["optimizer"])
+        require_training_profile(saved, ds.training_profile)
+        load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer)
         start = saved["epoch"] + 1
         torch.set_rng_state(saved["rng"]["torch"].cpu())
         np.random.set_state(saved["rng"]["numpy"])
@@ -220,6 +229,14 @@ def train_gain(model, saved, args):
     metadata = json.loads(Path(args.teacher).with_suffix(".json").read_text(encoding="utf-8"))
     if metadata.get("split") != "train" or metadata.get("generator_sha256") != generator_signature(model):
         raise ValueError("Teacher cache is from the wrong split or a different generator/RGR/configuration")
+    ds = dataset(args, "train")
+    args.training_profile = ds.training_profile
+    ds.close()
+    require_training_profile(metadata, args.training_profile, context="Teacher cache")
+    if metadata.get("training_mode") != args.training_mode:
+        raise ValueError("Teacher cache training mode differs from the requested training mode")
+    if args.resume:
+        require_training_profile(saved, args.training_profile)
     if metadata.get("partial_debug_run") and not args.allow_debug:
         raise ValueError("Debug teacher cannot be used without --allow-debug")
     archive = np.load(args.teacher, allow_pickle=False)
@@ -238,10 +255,10 @@ def train_gain(model, saved, args):
     for p in model.gain.parameters():
         p.requires_grad_(True)
     model.eval()
-    optimizer = torch.optim.Adam(model.gain.parameters(), lr=args.lr)
+    optimizer = make_optimizer(torch.optim.Adam, model.gain.parameters(), lr=args.lr, fused=args.fused_optimizer)
     start = 0
     if args.resume:
-        optimizer.load_state_dict(saved["optimizer"])
+        load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer)
         start = saved["epoch"] + 1
         torch.set_rng_state(saved["rng"]["torch"].cpu())
     out = Path(args.output)
@@ -335,7 +352,8 @@ def predict(model, saved, args):
 
 def smoke(model, args):
     ds = dataset(args, "train", supervision=True)
-    sample = ds[(3, 0)]  # includes a known online noise-family sample
+    noise_epoch = (3 - ds.source_index(0)) % 5
+    sample = ds[(noise_epoch, 0)]  # Keep the noise-family check after patch subsetting.
     x = torch.from_numpy(sample["input_xyz"])[None].to(args.device)
     gt = torch.from_numpy(sample["gt_xyz"])[None].to(args.device)
     supervision = {key: torch.from_numpy(value)[None].to(args.device) for key, value in sample["supervision"].items()}
@@ -426,6 +444,8 @@ def main():
     parser.add_argument("--split", default="train", choices=["train", "validation", "pu1k_patch", "pu1k_object", "modelnet40_patch", "official"])
     parser.add_argument("--condition")
     parser.add_argument("--training-mode", choices=["mixed", "clean"], default="mixed")
+    parser.add_argument("--train-patches-per-object", type=int, default=DEFAULT_TRAIN_PATCHES_PER_OBJECT,
+                        help="Fixed shared patches per training object (default: 32; 0: all stored patches)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--checkpoint")
     parser.add_argument("--resume")
@@ -435,6 +455,10 @@ def main():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gain-batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--assignment-workers", type=int, default=1,
+                        help="Parallel exact CPU matching within a batch; independent of --workers")
+    parser.add_argument("--fused-optimizer", action="store_true",
+                        help="Use CUDA fused Adam updates (optional floating-point rounding differences)")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--rgr-weight", type=float, default=1.)
     parser.add_argument("--gain-weight", type=float, default=.1)
@@ -464,6 +488,11 @@ def main():
         parser.error("Use either --checkpoint or --resume")
     if min(args.epochs, args.batch_size, args.gain_batch_size, args.online_teacher_every, args.save_every, args.samples, args.pairs) < 1:
         parser.error("Counts and frequencies must be positive")
+    if args.assignment_workers < 1:
+        parser.error("--assignment-workers must be positive")
+    if args.train_patches_per_object < 0:
+        parser.error("--train-patches-per-object must be nonnegative")
+    configure_assignment_workers(args.assignment_workers)
     seed_all(args.seed)
     model, saved = create_model(args)
     if args.command == "train":

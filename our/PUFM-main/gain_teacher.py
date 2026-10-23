@@ -85,7 +85,7 @@ def write_cache(model, dataset, path, indices, epochs, *, pairs=4, seed=21, debu
     model.eval()
     signature = generator_signature(model)
     fields = {key: [] for key in ["features", "budget", "receiver", "donor", "improvement", "before", "after",
-                                  "sample_id", "base_id", "object_id", "index", "epoch", "delta", "input_sha256", "gt_sha256"]}
+                                  "sample_id", "base_id", "object_id", "index", "source_index", "epoch", "delta", "input_sha256", "gt_sha256"]}
     device = next(model.parameters()).device
     for epoch in epochs:
         for number in indices:
@@ -96,7 +96,8 @@ def write_cache(model, dataset, path, indices, epochs, *, pairs=4, seed=21, debu
             with torch.no_grad():
                 state = model.encode(points, for_teacher=True)
                 methods = ["uniform", "density", "curvature"]
-                selected_seed = stable_seed(seed, number, epoch)
+                source_index = dataset.source_index(number)
+                selected_seed = stable_seed(seed, source_index, epoch)
                 delta = [max(1, model.config.swap_step // 2), model.config.swap_step, model.config.swap_step * 2][selected_seed % 3]
                 records = paired_labels(model, state, gt, scale, pairs=pairs, delta=delta,
                                         base_method=methods[(selected_seed // 3) % len(methods)], seed=selected_seed)
@@ -106,6 +107,7 @@ def write_cache(model, dataset, path, indices, epochs, *, pairs=4, seed=21, debu
                 for key in ["sample_id", "base_id", "object_id"]:
                     fields[key].append(sample[key])
                 fields["index"].append(number)
+                fields["source_index"].append(source_index)
                 fields["epoch"].append(epoch)
                 fields["delta"].append(record["delta"])
                 for key in ["input", "gt"]:
@@ -115,6 +117,7 @@ def write_cache(model, dataset, path, indices, epochs, *, pairs=4, seed=21, debu
     destination.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(destination, **{key: np.asarray(value) for key, value in fields.items()})
     metadata = {"protocol": "V3", "split": "train", "generator_sha256": signature,
+                "training_profile": dataset.training_profile,
                 "training_mode": dataset.training_mode,
                 "configuration": asdict(model.config), "records": len(fields["delta"]),
                 "seed": seed, "epochs": list(epochs), "base_indices": list(map(int, indices)),

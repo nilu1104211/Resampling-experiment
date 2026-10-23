@@ -15,6 +15,7 @@ from .core import input_transform
 from .v3_core import CONDITIONS, VALIDATION_CONDITIONS, corrupt_base, training_condition, seed
 from .v3_pipeline import read_row
 from .v3_paths import DEFAULT_ROOT, SourcePaths
+from .v3_training import DEFAULT_TRAIN_PATCHES_PER_OBJECT, training_selection
 
 SUPERVISION_KEYS = ["clean_input_xyz", "clean_input_normals", "denoise_offset", "gt_normals", "gt_curvature",
                     "gt_normal_variation", "hole_mask_gt", "sparse_mask_gt", "noise_mask_input",
@@ -84,7 +85,8 @@ class AdaptiveResamplingDataset:
     """
     def __init__(self, root=DEFAULT_ROOT, split="train", *, condition=None, training_mode="mixed",
                  include_supervision=None, normalize_for_model=True, augment_rotation=None,
-                 include_geometry_features=False, include_reference_metadata=False, max_open_files=8):
+                 include_geometry_features=False, include_reference_metadata=False, max_open_files=8,
+                 train_patches_per_object=DEFAULT_TRAIN_PATCHES_PER_OBJECT):
         self.root = Path(root)
         self.split = split
         self.training = split == "train"
@@ -107,16 +109,21 @@ class AdaptiveResamplingDataset:
         if split not in manifest["groups"]:
             raise ValueError(f"Unavailable split: {split}")
         self.entries = manifest["groups"][split]
+        self.training_profile = None
+        self.source_offsets = []
+        if self.training:
+            selected_rows, self.source_offsets, self.training_profile = training_selection(
+                manifest, train_patches_per_object, training_mode=self.training_mode)
         self.paths, self.row_maps, self.ends = [], [], []
         available = VALIDATION_CONDITIONS if split == "validation" else list(CONDITIONS)
         chosen = available if condition is None else [condition] if isinstance(condition, str) else list(condition)
         if not self.training and (not chosen or any(c not in available for c in chosen)):
             raise ValueError("Requested condition is not part of this evaluation split")
         total = 0
-        for entry in self.entries:
+        for number, entry in enumerate(self.entries):
             if self.training:
                 path = self.root / entry["path"]
-                rows = np.arange(entry["rows"], dtype="i4")
+                rows = selected_rows[number]
             else:
                 path = self.root / "processed" / split / Path(entry["path"]).name
                 rows = np.asarray([i * len(available) + available.index(c) for i in range(entry["rows"]) for c in chosen], dtype="i4")
@@ -132,6 +139,19 @@ class AdaptiveResamplingDataset:
 
     def set_epoch(self, epoch):
         self.epoch = int(epoch)
+
+    def source_index(self, index):
+        """Original full-data index, before per-object patch subsetting."""
+        index = int(index)
+        if index < 0:
+            index += len(self)
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        file_index = bisect_right(self.ends, index)
+        previous = self.ends[file_index - 1] if file_index else 0
+        if not self.training:
+            return index
+        return self.source_offsets[file_index] + int(self.row_maps[file_index][index - previous])
 
     def _handle(self, path):
         if os.getpid() != self._pid:
@@ -167,7 +187,7 @@ class AdaptiveResamplingDataset:
         data = read_row(self._handle(self.paths[file_index]), row)
         if self.training:
             selected_epoch = self.epoch if epoch is None else int(epoch)
-            condition, spec = training_condition(data["base_id"], index, selected_epoch, self.training_mode)
+            condition, spec = training_condition(data["base_id"], self.source_index(index), selected_epoch, self.training_mode)
             data = corrupt_base(data, condition, spec=spec, epoch=selected_epoch)
         return data
 

@@ -1,0 +1,73 @@
+{
+  "status": "passed",
+  "training_profile": {
+    "policy": "per-object-seeded-subset-v1",
+    "patches_per_object": 32,
+    "objects": 797,
+    "samples": 25504,
+    "source_samples": 51008,
+    "selection_sha256": "0092df848562dfb8ccf772113e425405faa9da7f34320914797f9b408fe7a739",
+    "source_config_digest": "518601fcbad72f8dd8fab97f2bce5f6442d86f1bc9f8cfa86681472cbcfdb994",
+    "training_mode": "mixed"
+  },
+  "all_797_objects_have_32_patches": true,
+  "original_online_data_and_supervision_equal": true,
+  "same_subset_in_comparison_and_ours": true,
+  "workers_0_2_persistent_epochs_equal": true,
+  "evaluation_unchanged": [
+    {
+      "split": "validation",
+      "samples_per_condition": 400
+    },
+    {
+      "split": "pu1k_patch",
+      "samples_per_condition": 508
+    },
+    {
+      "split": "pu1k_object",
+      "samples_per_condition": 127
+    }
+  ],
+  "metadata_unchanged": {
+    "generation_config.json": "ea38a6bf41b7f32adcaacb62d6c401f59ca6d280707eb6a517dad2fa74c60070",
+    "base_manifest.json": "e58fe47465bd312f16403421a26d33fe179e83a73174107037b49e59dc3ba72c",
+    "dataset_splits.json": "e7eaa480bd133ce08ba6057757b52f4c01a668b3bd1102195af53702fb56d833"
+  },
+  "checked_training_samples": [
+    {
+      "subset_index": 0,
+      "source_index": 1,
+      "sample_id": "pu1k/02691156.124a579e0635b8eace19d55bc5e6a406/train/patch_001/online_normal"
+    },
+    {
+      "subset_index": 31,
+      "source_index": 61,
+      "sample_id": "pu1k/02691156.124a579e0635b8eace19d55bc5e6a406/train/patch_061/online_normal"
+    },
+    {
+      "subset_index": 32,
+      "source_index": 65,
+      "sample_id": "pu1k/02691156.304c2daaf96c79138cdbee8c4dbbdd7c/train/patch_001/online_mixed"
+    },
+    {
+      "subset_index": 4096,
+      "source_index": 8194,
+      "sample_id": "pu1k/02871439.1ecd9316bf586354ae25f6fe802a8997/train/patch_002/online_noise"
+    },
+    {
+      "subset_index": 12752,
+      "source_index": 25510,
+      "sample_id": "pu1k/03513137.eafb1b2b77dbf8c8172c0c1bc4c72a8c/train/patch_038/online_mixed"
+    },
+    {
+      "subset_index": 25503,
+      "source_index": 51005,
+      "sample_id": "pu1k/04554684.eca8612dc1cc153c4df5aaa9df719285/train/patch_061/online_mixed"
+    }
+  ],
+  "epochs_checked": [
+    0,
+    3,
+    9
+  ]
+}

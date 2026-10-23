@@ -62,6 +62,8 @@ python -B examples/use_v3_data.py --workers 2 --batch-size 2
 
 ## 网络入口
 
+当前所有训练入口默认每个对象使用 **32 个 patch**，共 **25,504 条/epoch**；训练对象仍为 797 个。已有数据包可以继续使用；`--batch-size` 保留各命令设置。说明与检查命令见 [32-patch 训练配置](compare-change/V3_TRAINING_32.md)。
+
 ```bash
 v3 pufmpp --help
 v3 spu-imr --help
@@ -70,6 +72,10 @@ ours --help
 ```
 
 `v3` 和 `ours` 是 `source env_v3.sh` 定义的 Bash 函数。三个对比方法分别调用 `compare-change` 下的 `v3.py`，PUFM 基线与 Ours 调用 `our/PUFM-main/adaptive_v3.py`。完整训练、候选保存、PUFM++ 时间表、预测和评价命令见运行说明。
+
+PUFM++ S1、PUFM 基线与 Ours 的精确匹配可加 `--assignment-workers 4` 并行处理。默认仍为串行；测速命令和适用范围见 [V3 匹配加速说明](compare-change/V3_MATCHING_SPEED.md)。
+
+训练还可加 `--fused-optimizer` 使用 CUDA 融合优化器。它默认关闭，可能有细小浮点舍入差异；测速命令与其他候选优化见 [V3 后续加速说明](compare-change/V3_OTHER_SPEEDUPS.md)。
 
 ## 官方 XYZ 与 P2F 网格
 

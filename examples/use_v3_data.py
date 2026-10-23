@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from adaptive_resampling.v3_dataset import DEFAULT_ROOT, AdaptiveResamplingDataset, EpochSampler, inverse_prediction
+from adaptive_resampling.v3_training import DEFAULT_TRAIN_PATCHES_PER_OBJECT
 
 
 def main():
@@ -17,10 +18,13 @@ def main():
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--numpy-only", action="store_true")
+    parser.add_argument("--train-patches-per-object", type=int, default=DEFAULT_TRAIN_PATCHES_PER_OBJECT)
     args = parser.parse_args()
-    train = AdaptiveResamplingDataset(args.root, "train", training_mode="mixed", include_supervision=True)
+    train = AdaptiveResamplingDataset(args.root, "train", training_mode="mixed", include_supervision=True,
+                                      train_patches_per_object=args.train_patches_per_object)
     sampler = EpochSampler(train)
     print("Training clean bases:", len(train))
+    print("Training profile:", train.training_profile)
     if args.numpy_only:
         for epoch in range(5):
             sampler.set_epoch(epoch)
