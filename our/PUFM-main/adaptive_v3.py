@@ -145,7 +145,8 @@ def train(model, saved, args):
         if saved.get("args", {}).get("training_mode") != args.training_mode:
             raise ValueError("Resume cannot change the training data mode")
         require_training_profile(saved, ds.training_profile)
-        load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer)
+        load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer,
+                             disable_fused=getattr(args, "no_fused_optimizer", False))
         start = saved["epoch"] + 1
         torch.set_rng_state(saved["rng"]["torch"].cpu())
         np.random.set_state(saved["rng"]["numpy"])
@@ -258,7 +259,8 @@ def train_gain(model, saved, args):
     optimizer = make_optimizer(torch.optim.Adam, model.gain.parameters(), lr=args.lr, fused=args.fused_optimizer)
     start = 0
     if args.resume:
-        load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer)
+        load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer,
+                             disable_fused=getattr(args, "no_fused_optimizer", False))
         start = saved["epoch"] + 1
         torch.set_rng_state(saved["rng"]["torch"].cpu())
     out = Path(args.output)
@@ -457,8 +459,11 @@ def main():
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--assignment-workers", type=int, default=1,
                         help="Parallel exact CPU matching within a batch; independent of --workers")
-    parser.add_argument("--fused-optimizer", action="store_true",
-                        help="Use CUDA fused Adam updates (optional floating-point rounding differences)")
+    optimizer_options = parser.add_mutually_exclusive_group()
+    optimizer_options.add_argument("--fused-optimizer", action="store_true",
+                                   help="Use CUDA fused Adam updates (optional floating-point rounding differences)")
+    optimizer_options.add_argument("--no-fused-optimizer", action="store_true",
+                                   help="Explicitly disable fused updates, including when resuming a fused checkpoint")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--rgr-weight", type=float, default=1.)
     parser.add_argument("--gain-weight", type=float, default=.1)

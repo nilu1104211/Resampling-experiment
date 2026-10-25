@@ -202,7 +202,8 @@ def train(adapter, args):
         for key in ["training_mode"] + (["stage"] if args.model_name == "pufm++" else []):
             if saved.get("args", {}).get(key) != getattr(args, key):
                 raise ValueError(f"Resume cannot change {key}; use --checkpoint for a new fine-tuning stage")
-        load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer)
+        load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer,
+                             disable_fused=getattr(args, "no_fused_optimizer", False))
         start = saved["epoch"] + 1
         if "rng" in saved:
             random.setstate(saved["rng"]["python"])
@@ -212,6 +213,9 @@ def train(adapter, args):
                 torch.cuda.set_rng_state_all([s.cpu() for s in saved["rng"]["cuda"]])
     elif args.checkpoint:
         load_weights(adapter, args.checkpoint, args)
+    print(json.dumps({"runtime": {"start_epoch_zero_based": start, "loader_workers": args.workers,
+                                  "assignment_workers": getattr(args, "assignment_workers", 1),
+                                  "fused_optimizer": any(bool(g.get("fused")) for g in optimizer.param_groups)}}), flush=True)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     for epoch in range(start, args.epochs):
@@ -356,8 +360,11 @@ def main(folder, model_name):
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--assignment-workers", type=int, default=1,
                         help="Parallel exact CPU matching within a batch; independent of --workers")
-    parser.add_argument("--fused-optimizer", action="store_true",
-                        help="Use CUDA fused AdamW/Adam updates (optional floating-point rounding differences)")
+    optimizer_options = parser.add_mutually_exclusive_group()
+    optimizer_options.add_argument("--fused-optimizer", action="store_true",
+                                   help="Use CUDA fused AdamW/Adam updates (optional floating-point rounding differences)")
+    optimizer_options.add_argument("--no-fused-optimizer", action="store_true",
+                                   help="Explicitly disable fused updates, including when resuming a fused checkpoint")
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--lr", type=float, default=1e-4 if model_name == "pufm++" else 1e-3 if model_name == "spu-imr" else 5e-4)
     parser.add_argument("--weight-decay", type=float, default=0 if model_name == "pufm++" else .05)

@@ -19,6 +19,8 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(p).all())
         with self.assertRaisesRegex(ValueError, "requires CUDA"):
             make_optimizer(torch.optim.AdamW, [p], fused=True)
+        with self.assertRaisesRegex(ValueError, "both enable and disable"):
+            load_optimizer_state(optimizer, optimizer.state_dict(), fused=True, disable_fused=True)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
     def test_fused_adam_and_adamw_match_standard_updates(self):
@@ -66,6 +68,32 @@ class OptimizerTests(unittest.TestCase):
             torch.testing.assert_close(p, q, atol=2e-7, rtol=2e-6)
             for key in ("exp_avg", "exp_avg_sq"):
                 torch.testing.assert_close(original.state[p][key], resumed.state[q][key], atol=1e-8, rtol=2e-6)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
+    def test_resume_can_disable_fused_without_resetting_moments_or_steps(self):
+        for kind in (torch.optim.Adam, torch.optim.AdamW):
+            p = torch.nn.Parameter(torch.tensor([.3, -.5, 1.2], device="cuda"))
+            original = make_optimizer(kind, [p], lr=1e-4, weight_decay=.05, fused=True)
+            for _ in range(3):
+                p.grad = torch.tensor([.2, -.1, .3], device="cuda")
+                original.step()
+            saved = copy.deepcopy(original.state_dict())
+            q = torch.nn.Parameter(p.detach().clone())
+            resumed = make_optimizer(kind, [q], lr=1e-4, weight_decay=.05)
+            load_optimizer_state(resumed, saved, disable_fused=True)
+            self.assertFalse(resumed.param_groups[0]["fused"])
+            self.assertIsNone(resumed.param_groups[0]["foreach"])
+            self.assertEqual(resumed.state[q]["step"].device.type, "cpu")
+            self.assertEqual(int(resumed.state[q]["step"]), 3)
+            for key in ("exp_avg", "exp_avg_sq"):
+                torch.testing.assert_close(original.state[p][key], resumed.state[q][key], atol=0, rtol=0)
+            for _ in range(5):
+                p.grad = torch.tensor([-.2, .6, -.1], device="cuda")
+                q.grad = p.grad.clone()
+                original.step()
+                resumed.step()
+            self.assertEqual(int(resumed.state[q]["step"]), 8)
+            torch.testing.assert_close(p, q, atol=2e-7, rtol=2e-6)
 
 
 if __name__ == "__main__":
