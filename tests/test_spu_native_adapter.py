@@ -32,7 +32,7 @@ class FakeRecovery(nn.Module):
         return points.square().mean() + self.weight.square()
 
 
-def make_adapter(profile="native"):
+def make_adapter(profile="shared-v3"):
     args = SimpleNamespace(spu_profile=profile, spu_groups=None, spu_transport="hungarian", spu_passes=8,
                            spu_schedule_epochs=6000, spu_warmup_epochs=50)
     with patch.object(spu, "Network_Model", return_value=FakeRecovery()):
@@ -44,7 +44,8 @@ class SPUNativeTests(unittest.TestCase):
         spu.utils.configure_transport("hungarian")
 
     def test_native_and_legacy_group_profiles_are_explicit(self):
-        self.assertEqual(make_adapter().args.spu_groups, 256)
+        self.assertEqual(make_adapter().args.spu_groups, 64)
+        self.assertEqual(make_adapter("native").args.spu_groups, 256)
         self.assertEqual(make_adapter("legacy-patch256").args.spu_groups, 64)
 
     def test_old_checkpoint_requires_legacy_profile(self):
@@ -61,21 +62,25 @@ class SPUNativeTests(unittest.TestCase):
             legacy.args.model_name = "spu-imr"
             v3_common.load_weights(legacy, checkpoint, legacy.args)
 
-    def test_native_training_ignores_clean_gt_and_requires_real_observations(self):
+    def test_shared_training_uses_unchanged_256_observations_and_ignores_clean_gt(self):
         model = make_adapter()
-        x = torch.randn(1, 1024, 3)
-        a = model.training_loss(x, torch.zeros(1, 1024, 3))
+        x = torch.randn(1, 256, 3)
+        with patch.object(model.model, "forward", wraps=model.model.forward) as forward:
+            a = model.training_loss(x, torch.zeros(1, 1024, 3))
+            self.assertTrue(torch.equal(forward.call_args.args[0], x))
         b = model.training_loss(x, torch.full((1, 1024, 3), 12345.))
         self.assertTrue(torch.equal(a, b))
         a.backward()
         self.assertGreater(model.model.weight.grad.abs().item(), 0)
         with self.assertRaises(ValueError):
-            model.training_loss(x[:, :256], x)
+            model.training_loss(torch.randn(1, 1024, 3), x)
+        with self.assertRaisesRegex(ValueError, "historical"):
+            make_adapter("native").training_loss(torch.randn(1, 1024, 3), x)
 
     def test_inference_matches_source_bbox_filter_and_seeded_fps(self):
         torch.manual_seed(12)
         points = torch.randn(1, 256, 3)
-        model = make_adapter()
+        model = make_adapter("native")
         state = torch.get_rng_state().clone()
         with patch.dict(os.environ, V3_FPS_BACKEND="torch"), torch.inference_mode():
             actual = model.predict(points, 1024)
@@ -93,6 +98,18 @@ class SPUNativeTests(unittest.TestCase):
                 expected = spu.utils.fps(filtered * scale + center, 1024)
         self.assertTrue(torch.equal(actual, expected))
         self.assertFalse(model.last_diagnostics["deduplicated"])
+
+    def test_shared_patch_output_has_exact_budget_without_renormalizing_input(self):
+        model = make_adapter()
+        torch.manual_seed(12)
+        points = torch.randn(2, 256, 3)
+        with patch.dict(os.environ, V3_FPS_BACKEND="torch"), torch.inference_mode(), \
+             patch.object(model.model, "forward", wraps=model.model.forward) as forward:
+            result = model.predict(points, 1024)
+            self.assertTrue(torch.equal(forward.call_args_list[0].args[0], points[:1]))
+        self.assertEqual(result.shape, (2, 1024, 3))
+        for cloud in result:
+            self.assertEqual(torch.unique(cloud, dim=0).shape[0], 1024)
 
     def test_cosine_recipe_starts_at_source_warmup_rate(self):
         model = make_adapter()

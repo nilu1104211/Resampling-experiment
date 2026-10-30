@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 import pickle
 import tempfile
+import sys
+from types import SimpleNamespace
 import unittest
 
 import h5py
@@ -145,23 +147,26 @@ class V3DatasetTests(unittest.TestCase):
         full.close()
         dataset.close()
 
-    def test_native_spu_observations_come_from_pool_without_rewriting_base_or_gt(self):
-        legacy = AdaptiveResamplingDataset(self.root, include_supervision=False)
-        native = AdaptiveResamplingDataset(self.root, include_supervision=False, training_input_points=1024)
+    def test_shared_spu_reads_identical_inputs_gt_and_training_profile(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "compare-change"))
+        import v3_common
+        values = dict(root=self.root, condition=None, training_mode="mixed", train_patches_per_object=32)
+        spu = v3_common.dataset(SimpleNamespace(**values, model_name="spu-imr", spu_profile="shared-v3"), "train")
+        pufmpp = v3_common.dataset(SimpleNamespace(**values, model_name="pufm++"), "train")
         try:
+            self.assertEqual(spu.training_profile, pufmpp.training_profile)
             for epoch in range(5):
-                a, b = legacy.raw_sample(0, epoch), native.raw_sample(0, epoch)
+                a, b = spu[(epoch, 0)], pufmpp[(epoch, 0)]
                 self.assertEqual(a["input_xyz"].shape, (256, 3))
-                self.assertEqual(b["input_xyz"].shape, (1024, 3))
-                self.assertEqual(a["condition"], b["condition"])
+                self.assertEqual(a["gt_xyz"].shape, (1024, 3))
+                np.testing.assert_array_equal(a["input_xyz"], b["input_xyz"])
                 np.testing.assert_array_equal(a["gt_xyz"], b["gt_xyz"])
-                self.assertEqual(b["quality"]["input_gt_exact_overlap"], 0)
-                self.assertEqual(b["quality"]["clean_hole_intrusions"], 0)
-            self.assertEqual(native.training_profile["input_points"], 1024)
-            self.assertEqual(legacy.raw_sample(0)["input_xyz"].shape[0], 256)
+                self.assertEqual(a["sample_id"], b["sample_id"])
+            with self.assertRaisesRegex(ValueError, "excluded from shared training"):
+                v3_common.dataset(SimpleNamespace(**values, model_name="spu-imr", spu_profile="native"), "train")
         finally:
-            legacy.close()
-            native.close()
+            spu.close()
+            pufmpp.close()
 
     def test_cached_files_are_not_pickled_into_workers(self):
         dataset = AdaptiveResamplingDataset(self.root)

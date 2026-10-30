@@ -64,6 +64,8 @@ python -B examples/use_v3_data.py --workers 2 --batch-size 2
 
 当前所有训练入口默认每个对象使用 **32 个 patch**，共 **25,504 条/epoch**；训练对象仍为 797 个。已有数据包可以继续使用；`--batch-size` 保留各命令设置。说明与检查命令见 [32-patch 训练配置](compare-change/V3_TRAINING_32.md)。
 
+SPU-IMR 主对比使用 `--spu-profile shared-v3`（默认），读取与其他方法完全相同的 256 点训练观测与 1024 点 GT，保留其输入内部的自监督目标。局部输出为 1024 点，整物体为 2048→8192。之前的 native-1024 训练入口已禁用；60 轮训练命令及加速说明见 [最新更新说明](docs/测试加速与SPU适配更新_2026-10-30.md)。
+
 ```bash
 v3 pufmpp --help
 v3 spu-imr --help

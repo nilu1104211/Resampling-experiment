@@ -13,12 +13,12 @@ Linux 服务器使用新增的 `run_v3.sh`；路径迁移、分段保存候选�
 | 方法 | 保留的结构与目标 | V3 适配 |
 |---|---|---|
 | PUFM++ | 原 RIN：6 个 RCW block、每 block 4 层 compute、256 个 latent、z_dim=512、x_dim=512；s1 FM 与 s2 Chamfer 微调 | 初始化只来自实际退化输入；修复 GlobalNet 的 FPS 接口和特征索引维度；训练使用 1024 个 query；整物体使用 256 点观测 Patch 分别生成并还原合并；s3 在训练集校准时间调度 |
-| SPU-IMR | 原三次迭代 Mask-recovery、Transformer、原自监督恢复目标 | 每个 256 点输入使用 64 个中心，保持原实现 1024/256 的中心比例；8 次恢复候选、原密度过滤、去重、FPS 得到 1024 点；对象通过 Patch 合并到 8192；移除构造器强制 `.cuda()` |
+| SPU-IMR | 原三次迭代 Mask-recovery、Transformer、原自监督恢复目标 | 主对比 `shared-v3` 严格读取相同 256 点输入，64 个中心×16 点，保留 8 次恢复和密度过滤，不在过滤前去重；最终 FPS 为 1024 点，整物体合并为 8192 点；保留源 EMD 与 cosine，历史 native-1024 仅用于独立推理参考 |
 | OUNet | 原八叉树 CNN，逐层占用分类与叶节点位移回归 | 用固定 0.5 缩放替代原乘 1.7 后裁剪；输入与 GT 使用同一变换，越界报错而不裁点；推理按占用得分选叶节点，最终恰好 M 个，无复制点补齐 |
 
 **训练目标的区别必须在论文中披露：** SPU-IMR 保持自监督，其恢复目标来自实际输入内部的被遮挡邻域，不使用 V3 干净 GT 计算损失。因此 mixed 训练中的噪声也可能被其重建；这是原目标在该任务上的适配结果，不能称为与另两种方法相同的干净 GT 监督。所有方法共享数据划分、实际观测、退化协议和评价。
 
-**传输算子：** 为避免缺失／不兼容的原 CUDA EMD 扩展，PUFM++ 对齐和 SPU-IMR 恢复损失使用 SciPy Hungarian 的精确等点数匹配，坐标代价为平方距离，梯度通过匹配后坐标回传。这保留了传输对齐／恢复任务，但与原近似 CUDA EMD 的数值实现不同，应披露算子后端；不能直接将结果称为原论文官方复现数值。该后端在 CPU 做匹配，训练速度也需单独报告。
+**传输算子：** PUFM++ 当前对齐仍使用 SciPy Hungarian 平方距离匹配，不能称为原 CUDA EMD 的完全等价实现。SPU 的 `shared-v3` 默认恢复源近似 EMD 欧氏代价，缺少旧扩展时通过 NVRTC 运行保留的源 CUDA 核函数。SPU 的 Hungarian 仅作为显式后端变体或旧权重协议保留。
 
 **OUNet 固定预算推理：** 原来输出点数随占用叶节点变化。本适配在每层以占用 logit 差排序，至少保留 `ceil(M/8^(D-d))` 个祖先节点，并将超额探索限制为该数量的 `--octree-beam` 倍（默认 4）；最后一层选恰好 M 个叶节点。训练仍使用原 GT 八叉树和原损失。这是显式推理适配，应标为 OUNet-V3 fixed-budget，记录原生官方协议结果时另列。由于固定 M，网络被迫输出足够数量的叶节点，效果需训练后评估。
 
@@ -56,11 +56,11 @@ PUFM++ 保留基于真实输入的回投约束（默认步长 0.01），不裁�
 # 第三阶段只在训练集校准，默认遍历完整训练集和 51 个时间位置
 .\run_v3.ps1 pufmpp schedule --checkpoint v3_runs/pufmpp_s2/last.pt --flow-steps 6 --output v3_runs/pufmpp_schedule.pt
 
-.\run_v3.ps1 spu-imr train --epochs 60 --batch-size 2 --workers 2 --training-mode mixed --output v3_runs/spu
+.\run_v3.ps1 spu-imr train --spu-profile shared-v3 --spu-transport source --epochs 60 --spu-schedule-epochs 60 --spu-warmup-epochs 5 --batch-size 8 --workers 0 --training-mode mixed --output v3_runs/spu_shared256
 .\run_v3.ps1 ounet train --epochs 60 --batch-size 2 --workers 2 --training-mode mixed --output v3_runs/ounet
 
 # 续训使用 --resume，--epochs 表示总轮数。
-.\run_v3.ps1 spu-imr train --resume v3_runs/spu/last.pt --epochs 120 --workers 2 --output v3_runs/spu
+.\run_v3.ps1 spu-imr train --spu-profile shared-v3 --spu-transport source --resume v3_runs/spu_shared256/last.pt --epochs 60 --spu-schedule-epochs 60 --spu-warmup-epochs 5 --batch-size 8 --workers 0 --output v3_runs/spu_shared256
 
 # 固定条件逐项推理；完整条件名称见 V3 使用说明。
 .\run_v3.ps1 pufmpp predict --checkpoint v3_runs/pufmpp_s2/last.pt --schedule v3_runs/pufmpp_schedule.pt --split pu1k_patch --condition C2_hole_10 --output predictions/pufmpp_C2.npz

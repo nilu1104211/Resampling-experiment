@@ -16,15 +16,18 @@ class Adapter(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.profile = getattr(args, "spu_profile", "legacy-patch256")
+        self.profile = getattr(args, "spu_profile", "shared-v3")
         self.native = self.profile == "native"
+        self.shared = self.profile == "shared-v3"
         groups = getattr(args, "spu_groups", None)
         args.spu_groups = groups if groups is not None else (256 if self.native else 64)
         args.spu_profile = self.profile
-        args.spu_transport = getattr(args, "spu_transport", None) or ("source" if self.native else "hungarian")
+        args.spu_transport = getattr(args, "spu_transport", None) or ("hungarian" if self.profile == "legacy-patch256" else "source")
         utils.configure_transport(args.spu_transport)
         if self.native and args.spu_groups != 256:
             raise ValueError("Native SPU uses 256 groups; use --spu-profile legacy-patch256 for the old adapted grouping")
+        if self.shared and args.spu_groups != 64:
+            raise ValueError("Shared V3 uses 256 observations and 64 groups to retain the source observations/groups ratio")
         cfg = yaml.safe_load((Path(__file__).parent / "cfgs/setting.yaml").read_text(encoding="utf-8"))
         cfg["data"]["up_rate"] = cfg["transformer"]["up_rate"] = 4
         cfg["model"]["num_group"] = args.spu_groups
@@ -35,11 +38,14 @@ class Adapter(nn.Module):
             raise ValueError("Not enough recovery candidates for 1024 outputs; increase --spu-passes")
         self.model = Network_Model(cfg)
         if self.native:
-            self.training_description = "SPU native 1024-observation/256-group self-supervision; independent V3 input pool; " + args.spu_transport + " transport; original cosine recipe"
+            self.training_description = "Historical native-1024 reference; excluded from shared-input training"
             self.inference_description = "SPU whole-input MMR; source bbox normalization, 8 seeded recoveries, density filter with original multiplicities, FPS to requested count"
+        elif self.shared:
+            self.training_description = "SPU-V3 shared unchanged 256-observation input; 64 groups x16; input-only self-supervision; " + args.spu_transport + " transport; cosine schedule"
+            self.inference_description = "SPU-V3 256->1024 local MMR; shared input normalization; source seeded recovery/density filter; patch merge to exactly 8192 for 2048-input objects"
 
     def make_scheduler(self, optimizer, args):
-        if not self.native:
+        if self.profile == "legacy-patch256":
             return None
         from timm.scheduler import CosineLRScheduler
         return CosineLRScheduler(optimizer, t_initial=args.spu_schedule_epochs, cycle_mul=1,
@@ -48,12 +54,15 @@ class Adapter(nn.Module):
 
     def training_loss(self, points, gt):
         # GT is deliberately unused: this is the native self-supervised comparison.
-        count = 1024 if self.native else 256
-        if points.shape[1:] != (count, 3):
-            raise ValueError(f"SPU {self.profile} training expects {count} actual observed points")
+        if self.native:
+            raise ValueError("Native-1024 is a historical inference reference; shared training requires --spu-profile shared-v3")
+        if points.shape[1:] != (256, 3) or gt.shape[1:] != (1024, 3):
+            raise ValueError("Shared SPU training requires the same 256-input/1024-GT records as the other methods; GT is not used in its self-supervised loss")
         return self.model(points, points.device).mean()
 
     def predict_patch(self, points):
+        if self.shared:
+            return self._source_predict(points, points.shape[1] * 4, bbox_normalize=False)
         outputs = []
         # The native vis path merges the batch axis, so use one cloud per call.
         for cloud in points.split(1):
@@ -82,13 +91,20 @@ class Adapter(nn.Module):
     def predict(self, points, output_count):
         if not self.native:
             return patch_predict(points, output_count, self.predict_patch)
+        return self._source_predict(points, output_count, bbox_normalize=True)
+
+    def _source_predict(self, points, output_count, *, bbox_normalize):
         if output_count != points.shape[1] * 4 or points.shape[1] < 256:
-            raise ValueError("Native SPU comparison expects >=256 observed points and a 4x output budget")
+            raise ValueError("SPU comparison expects >=256 observed points and a 4x output budget")
         results = []
         for cloud in points.split(1):
-            low, high = cloud.amin(1, keepdim=True), cloud.amax(1, keepdim=True)
-            center = (low + high) * .5
-            scale = (high - low).amax().clamp_min(1e-8)
+            if bbox_normalize:
+                low, high = cloud.amin(1, keepdim=True), cloud.amax(1, keepdim=True)
+                center = (low + high) * .5
+                scale = (high - low).amax().clamp_min(1e-8)
+            else:
+                # Preserve the common V3 model coordinates in training and testing.
+                center, scale = cloud.new_zeros(1, 1, 3), cloud.new_ones(())
             normalized = (cloud - center) / scale
             outputs = []
             devices = [cloud.device.index] if cloud.is_cuda else []
@@ -110,6 +126,8 @@ class Adapter(nn.Module):
             with torch.random.fork_rng(devices=devices):
                 torch.set_rng_state(final_rng)
                 prediction = utils.fps(filtered * scale + center, output_count)
+            if self.shared and torch.unique(prediction[0], dim=0).shape[0] != output_count:
+                raise RuntimeError("Shared SPU generated insufficient distinct points; repeated coordinates cannot pad the output budget")
             results.append(prediction)
             self.last_diagnostics = {"profile": self.profile, "observed_points": cloud.shape[1],
                                      "groups": self.args.spu_groups, "generated": candidates.shape[1],

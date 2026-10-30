@@ -114,6 +114,8 @@ def patch_predict(points, output_count, predictor, *, patch_points=256, patch_ra
 
 
 def dataset(args, split, *, supervision=False):
+    if split == "train" and getattr(args, "model_name", None) == "spu-imr" and getattr(args, "spu_profile", None) == "native":
+        raise ValueError("Native-1024 is excluded from shared training; use --spu-profile shared-v3 for unchanged 256-point inputs")
     if split == "official":
         return OfficialPU1KDataset(args.root)
     return AdaptiveResamplingDataset(
@@ -121,8 +123,6 @@ def dataset(args, split, *, supervision=False):
         training_mode=args.training_mode, include_supervision=supervision,
         augment_rotation=split == "train",
         train_patches_per_object=getattr(args, "train_patches_per_object", DEFAULT_TRAIN_PATCHES_PER_OBJECT),
-        training_input_points=(1024 if split == "train" and getattr(args, "model_name", None) == "spu-imr"
-                               and getattr(args, "spu_profile", None) == "native" else None),
     )
 
 
@@ -393,17 +393,19 @@ def main(folder, model_name):
     parser.add_argument("--patch-batch-size", type=int, default=1,
                         help="PUFM++ patch batch size; 1 preserves the original V3 arithmetic path")
     parser.add_argument("--spu-passes", type=int, default=8)
-    parser.add_argument("--spu-profile", choices=["native", "legacy-patch256"], default="native")
-    parser.add_argument("--spu-groups", type=int, help="Native: 256; legacy patch256: 64")
+    parser.add_argument("--spu-profile", choices=["shared-v3", "native", "legacy-patch256"], default="shared-v3")
+    parser.add_argument("--spu-groups", type=int, help="Shared V3: 64 groups on the same 256 observations; historical native reference: 256")
     parser.add_argument("--spu-transport", choices=["source", "hungarian"],
-                        help="Native defaults to source EMD; Hungarian is an explicit backend adaptation")
-    parser.add_argument("--spu-schedule-epochs", type=int, default=6000)
-    parser.add_argument("--spu-warmup-epochs", type=int, default=50)
+                        help="Shared V3 defaults to source EMD; Hungarian is an explicit backend adaptation")
+    parser.add_argument("--spu-schedule-epochs", type=int, default=60)
+    parser.add_argument("--spu-warmup-epochs", type=int, default=5)
     parser.add_argument("--octree-depth", type=int, default=8)
     parser.add_argument("--octree-scale", type=float, default=.5)
     parser.add_argument("--octree-beam", type=int, default=4)
     args = parser.parse_args()
     args.model_name = model_name
+    if model_name == "spu-imr" and args.spu_profile == "native" and args.command != "predict":
+        parser.error("The native-1024 profile is historical inference only. Shared training/smoke requires --spu-profile shared-v3 (256 input, 1024 output)")
     os.environ["V3_FPS_BACKEND"] = args.fps_backend
     if args.patch_batch_size < 1 or args.spu_schedule_epochs < 1 or not 0 <= args.spu_warmup_epochs < args.spu_schedule_epochs:
         parser.error("Invalid patch batch size or SPU schedule/warmup horizon")
