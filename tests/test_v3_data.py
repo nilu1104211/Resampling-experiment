@@ -145,6 +145,24 @@ class V3DatasetTests(unittest.TestCase):
         full.close()
         dataset.close()
 
+    def test_native_spu_observations_come_from_pool_without_rewriting_base_or_gt(self):
+        legacy = AdaptiveResamplingDataset(self.root, include_supervision=False)
+        native = AdaptiveResamplingDataset(self.root, include_supervision=False, training_input_points=1024)
+        try:
+            for epoch in range(5):
+                a, b = legacy.raw_sample(0, epoch), native.raw_sample(0, epoch)
+                self.assertEqual(a["input_xyz"].shape, (256, 3))
+                self.assertEqual(b["input_xyz"].shape, (1024, 3))
+                self.assertEqual(a["condition"], b["condition"])
+                np.testing.assert_array_equal(a["gt_xyz"], b["gt_xyz"])
+                self.assertEqual(b["quality"]["input_gt_exact_overlap"], 0)
+                self.assertEqual(b["quality"]["clean_hole_intrusions"], 0)
+            self.assertEqual(native.training_profile["input_points"], 1024)
+            self.assertEqual(legacy.raw_sample(0)["input_xyz"].shape[0], 256)
+        finally:
+            legacy.close()
+            native.close()
+
     def test_cached_files_are_not_pickled_into_workers(self):
         dataset = AdaptiveResamplingDataset(self.root)
         dataset[0]

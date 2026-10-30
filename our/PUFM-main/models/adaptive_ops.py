@@ -1,6 +1,7 @@
 """Portable B,N,C point operations; no ground truth or runtime extension builds."""
 import torch
 from adaptive_resampling.v3_transport import assignment_indices
+from adaptive_resampling.v3_pointops import fps_indices
 
 
 def gather(points, ids):
@@ -12,16 +13,7 @@ def gather(points, ids):
 def fps_ids(points, count):
     if not 0 < count <= points.shape[1]:
         raise ValueError(f"FPS count {count} is outside 1..{points.shape[1]}")
-    b, n, _ = points.shape
-    ids = torch.empty(b, count, dtype=torch.long, device=points.device)
-    distance = torch.full((b, n), float("inf"), device=points.device)
-    farthest = (points - points.mean(1, keepdim=True)).square().sum(-1).argmax(-1)
-    for i in range(count):
-        ids[:, i] = farthest
-        distance = torch.minimum(distance, (points - gather(points, farthest[:, None])).square().sum(-1))
-        distance.scatter_(1, farthest[:, None], -1)
-        farthest = distance.argmax(-1)
-    return ids
+    return fps_indices(points, count)
 
 
 def fps(points, count):

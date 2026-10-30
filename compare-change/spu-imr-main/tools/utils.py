@@ -5,11 +5,30 @@ import numpy as np
 import itertools
 from torch.autograd import Function
 from v3_common import transport_loss
+from adaptive_resampling.v3_pointops import fps_indices
+
+_transport = "hungarian"
+_source_emd = None
+
+
+def configure_transport(backend):
+    global _transport
+    if backend not in {"source", "hungarian"}:
+        raise ValueError("SPU transport must be source or hungarian")
+    _transport = backend
 
 
 def get_emd_loss(pred, gt):
-    # Exact equal-cardinality assignment, with differentiable squared point cost.
-    # Replaces the unavailable platform-specific approximate EMD extension.
+    global _source_emd
+    if _transport == "source":
+        if _source_emd is None:
+            try:
+                from eval.emd_pytorch_implement.pkg.emd_loss_layer import EMDLoss
+            except ImportError:
+                from source_emd import EMDLoss
+            _source_emd = EMDLoss()
+        return _source_emd(pred, gt).sum() / (pred.shape[1] * gt.shape[0])
+    # Explicit, disclosed alternative for environments without source EMD.
     return transport_loss(pred, gt)
 
 
@@ -89,22 +108,11 @@ def fps(xyz, npoint):
     Return:
         centroids: sampled pointcloud index, [B, npoint]
     """
-    device = xyz.device
-    B, N, C = xyz.shape
-    centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)    
-    distance = torch.ones(B, N).to(device) * 1e10                       
-    farthest = torch.randint(0, N, (B,), dtype=torch.long).to(device)  
-    batch_indices = torch.arange(B, dtype=torch.long).to(device)    
-    for i in range(npoint):
-        centroids[:, i] = farthest
-        centroid = xyz[batch_indices, farthest, :].view(B, 1, 3)
-        dist = torch.sum((xyz - centroid) ** 2, -1)
-        mask = dist < distance
-        distance[mask] = dist[mask]
-        farthest = torch.max(distance, -1)[1]
-
-    pcentroids = xyz[batch_indices[:, None], centroids, :]
-    return pcentroids
+    B, N, _ = xyz.shape
+    # Preserve source CPU RNG, finite initial distance and duplicate tie behavior.
+    start = torch.randint(0, N, (B,), dtype=torch.long).to(xyz.device)
+    ids = fps_indices(xyz, npoint, start_indices=start, exclude_selected=False, initial_distance=1e10)
+    return index_points(xyz, ids)
 
 
 def chamfer_distance2(point_cloud1, point_cloud2):

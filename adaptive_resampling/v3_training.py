@@ -49,3 +49,5 @@ def require_training_profile(saved, current, *, context="Resume"):
     if any(previous.get(key) != current.get(key) for key in keys):
         raise ValueError(f"{context} requires the same training patch selection and data mode; "
                          "use a new output/checkpoint stage when changing the training budget")
+    if previous.get("input_points", 256) != current.get("input_points", 256):
+        raise ValueError(f"{context} cannot change the training observation point budget")

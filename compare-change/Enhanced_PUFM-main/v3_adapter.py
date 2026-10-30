@@ -73,7 +73,8 @@ class Adapter(nn.Module):
         return query
 
     def predict(self, points, output_count):
-        return patch_predict(points, output_count, self.predict_patch)
+        return patch_predict(points, output_count, self.predict_patch,
+                             patch_batch_size=getattr(self.args, "patch_batch_size", 1))
 
     @torch.no_grad()
     def calibrate_schedule(self, ds, args):

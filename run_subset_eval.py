@@ -134,6 +134,8 @@ def make_plan(args):
         ours = repo / "adaptive_network/PUFM-main"
     per_model = selection["samples_per_condition"] * len(args.conditions)
     plan = {"runner_version": VERSION, "evaluation_scope": "fixed_object_subset",
+            "inference_runtime": {"fps_backend": getattr(args, "fps_backend", "auto"),
+                                  "patch_batch_size": getattr(args, "patch_batch_size", 1)},
             "repo": str(repo), "data_root": str(root), "output": str(args.output.resolve()),
             "comparison_root": str(comparison), "pufm_root": str(ours),
             "seed": args.seed, "split": args.split, "conditions": args.conditions, "models": args.models,
@@ -466,7 +468,8 @@ def load_network(plan, model):
     # Construction for explicit subset inference. Its times are always replaced
     # with the verified schedule before predict is called; no uniform ablation.
     args = SimpleNamespace(command="schedule", schedule=None, uniform_schedule=False,
-                           flow_steps=6, manifold_step=0.01, device=plan["device"], model_name="pufm++", stage="s2")
+                            flow_steps=6, manifold_step=0.01, device=plan["device"], model_name="pufm++", stage="s2",
+                            patch_batch_size=plan.get("inference_runtime", {}).get("patch_batch_size", 1))
     common.configure_assignment_workers(8)
     common.set_seed(plan["seed"])
     network = common.load_adapter(folder / "Enhanced_PUFM-main", args)
@@ -623,8 +626,10 @@ def evaluate_predictions(plan, model, condition, prediction, directory, schedule
 
 def worker(plan, model):
     configure_paths(plan)
+    os.environ["V3_FPS_BACKEND"] = plan.get("inference_runtime", {}).get("fps_backend", "auto")
     import numpy as np
     import torch
+    from adaptive_resampling.v3_pointops import fps_backend_status
     from adaptive_resampling.v3_dataset import AdaptiveResamplingDataset
     network, predict, common = load_network(plan, model)
     schedule_hash = None
@@ -662,6 +667,8 @@ def worker(plan, model):
                         if plan["device"].startswith("cuda"):
                             torch.cuda.synchronize()
                         seconds.append(time.perf_counter() - tick)
+                        if position == 0:
+                            print(f"{model} FPS runtime: {fps_backend_status()}", flush=True)
                         values.append(y[0].cpu().numpy())
                         ids.append(expected)
                         if (position + 1) % 8 == 0 or position + 1 == len(flatten(plan["selection"])):
@@ -678,6 +685,7 @@ def worker(plan, model):
                               "selection_sha256": plan["selection_sha256"], "schedule_sha256": schedule_hash,
                               "calibration_scope": plan["calibration"]["scope"] if model == "pufmpp" else "not_applicable",
                               "coordinates": "model", "inference_seconds": seconds,
+                               "fps_runtime": fps_backend_status(),
                               "prediction_wall_seconds": time.perf_counter() - started})
             finish_receipt(marker, key, [path, info])
         else:
@@ -765,11 +773,16 @@ def main():
     parser.add_argument("--schedule", type=Path, help="Existing full schedule with its original evaluation_manifest.json")
     parser.add_argument("--p2f", action="store_true", help="Also compute point-to-mesh distances on all SELECTED objects")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--fps-backend", choices=["auto", "cuda", "torch"], default="auto")
+    parser.add_argument("--patch-batch-size", type=int, default=1,
+                        help="PUFM++ patch batching; keep 1 for validated serial numerical equivalence")
     parser.add_argument("--pufm-checkpoint", type=Path, default=Path(CHECKPOINTS["pufm"]))
     parser.add_argument("--pufmpp-checkpoint", type=Path, default=Path(CHECKPOINTS["pufmpp"]))
     parser.add_argument("--worker", choices=["pufm", "pufmpp"], help=argparse.SUPPRESS)
     parser.add_argument("--job-manifest", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.patch_batch_size < 1:
+        parser.error("--patch-batch-size must be positive")
     if args.worker:
         worker(read_json(args.job_manifest), args.worker)
         return

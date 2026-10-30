@@ -86,10 +86,13 @@ class AdaptiveResamplingDataset:
     def __init__(self, root=DEFAULT_ROOT, split="train", *, condition=None, training_mode="mixed",
                  include_supervision=None, normalize_for_model=True, augment_rotation=None,
                  include_geometry_features=False, include_reference_metadata=False, max_open_files=8,
-                 train_patches_per_object=DEFAULT_TRAIN_PATCHES_PER_OBJECT):
+                 train_patches_per_object=DEFAULT_TRAIN_PATCHES_PER_OBJECT, training_input_points=None):
         self.root = Path(root)
         self.split = split
         self.training = split == "train"
+        if training_input_points is not None and (not self.training or not isinstance(training_input_points, int) or training_input_points < 32):
+            raise ValueError("training_input_points is a train-only observation budget >=32")
+        self.training_input_points = training_input_points
         self.training_mode = training_mode
         if training_mode not in {"mixed", "clean"}:
             raise ValueError("training_mode must be mixed or clean")
@@ -114,6 +117,9 @@ class AdaptiveResamplingDataset:
         if self.training:
             selected_rows, self.source_offsets, self.training_profile = training_selection(
                 manifest, train_patches_per_object, training_mode=self.training_mode)
+            if training_input_points is not None:
+                self.training_profile = {**self.training_profile, "input_points": training_input_points,
+                                         "observation_source": "independent_input_candidate_pool"}
         self.paths, self.row_maps, self.ends = [], [], []
         available = VALIDATION_CONDITIONS if split == "validation" else list(CONDITIONS)
         chosen = available if condition is None else [condition] if isinstance(condition, str) else list(condition)
@@ -186,6 +192,12 @@ class AdaptiveResamplingDataset:
         row = int(self.row_maps[file_index][index - previous])
         data = read_row(self._handle(self.paths[file_index]), row)
         if self.training:
+            if self.training_input_points is not None:
+                count = self.training_input_points
+                if count > len(data["pool_xyz"]):
+                    raise ValueError("Training observation budget exceeds the independent input pool")
+                # Only resample the independent observation pool, never clean GT.
+                data = {**data, "input_count": np.int32(count), "clean_indices": data["priority"][:count].copy()}
             selected_epoch = self.epoch if epoch is None else int(epoch)
             condition, spec = training_condition(data["base_id"], self.source_index(index), selected_epoch, self.training_mode)
             data = corrupt_base(data, condition, spec=spec, epoch=selected_epoch)

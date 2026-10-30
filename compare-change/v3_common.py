@@ -14,7 +14,10 @@ import torch
 
 
 def bootstrap():
-    code = Path(os.environ.get("V3_CODE_ROOT", Path(__file__).resolve().parents[2]))
+    configured = os.environ.get("V3_CODE_ROOT")
+    code = (Path(configured) if configured else
+            next((p for p in Path(__file__).resolve().parents if (p / "adaptive_resampling/v3_dataset.py").is_file()),
+                 Path(__file__).resolve().parents[1]))
     if not (code / "adaptive_resampling/v3_dataset.py").is_file():
         raise FileNotFoundError("Set V3_CODE_ROOT to the directory containing adaptive_resampling")
     sys.path.insert(0, str(code))
@@ -26,6 +29,7 @@ from adaptive_resampling.v3_dataset import DEFAULT_ROOT, AdaptiveResamplingDatas
 from adaptive_resampling.v3_transport import assignment_indices, configure_assignment_workers
 from adaptive_resampling.v3_optimizer import make_optimizer, load_optimizer_state
 from adaptive_resampling.v3_training import DEFAULT_TRAIN_PATCHES_PER_OBJECT, require_training_profile
+from adaptive_resampling.v3_pointops import fps_indices
 
 
 def set_seed(value):
@@ -40,24 +44,6 @@ def index_points(points, ids):
     """B,N,C and B,... -> B,...,C."""
     batch = torch.arange(len(points), device=points.device)
     return points[batch.reshape((-1,) + (1,) * (ids.ndim - 1)), ids]
-
-
-@torch.no_grad()
-def fps_indices(points, count):
-    if points.ndim != 3 or points.shape[-1] != 3 or not 0 < count <= points.shape[1]:
-        raise ValueError(f"FPS needs 0 < count <= available points, got {count}/{points.shape}")
-    batch, size, _ = points.shape
-    distance = torch.full((batch, size), float("inf"), device=points.device)
-    selected = torch.empty(batch, count, dtype=torch.long, device=points.device)
-    # Deterministic for the same ordered input, independent of global RNG.
-    farthest = ((points - points.mean(1, keepdim=True)) ** 2).sum(-1).argmax(1)
-    for i in range(count):
-        selected[:, i] = farthest
-        center = index_points(points, farthest[:, None])
-        distance = torch.minimum(distance, ((points - center) ** 2).sum(-1))
-        distance.scatter_(1, farthest[:, None], -1)
-        farthest = distance.argmax(1)
-    return selected
 
 
 def fps(points, count):
@@ -98,10 +84,12 @@ def validate_prediction(prediction, batch, count):
 
 
 @torch.no_grad()
-def patch_predict(points, output_count, predictor, *, patch_points=256, patch_rate=3):
+def patch_predict(points, output_count, predictor, *, patch_points=256, patch_rate=3, patch_batch_size=1):
     """GT-free inference: normalize input patches, restore coordinates, merge by FPS."""
     if points.shape[1] * 4 != output_count:
         raise ValueError("V3 comparison adapters implement 4x upsampling")
+    if patch_batch_size < 1:
+        raise ValueError("patch_batch_size must be positive")
     if points.shape[1] == patch_points:
         return validate_prediction(predictor(points), len(points), output_count)
     if points.shape[1] < patch_points:
@@ -114,11 +102,13 @@ def patch_predict(points, output_count, predictor, *, patch_points=256, patch_ra
         center = patches.mean(1, keepdim=True)
         scale = (patches - center).norm(dim=-1).amax(1).reshape(-1, 1, 1).clamp_min(1e-8)
         predictions = []
-        for i in range(len(patches)):
-            pred = predictor(((patches - center) / scale)[i:i + 1])
-            validate_prediction(pred, 1, patch_points * 4)
-            predictions.append(pred * scale[i:i + 1] + center[i:i + 1])
-        merged = torch.cat(predictions, 1)
+        normalized = (patches - center) / scale
+        for i in range(0, len(patches), patch_batch_size):
+            batch = normalized[i:i + patch_batch_size]
+            pred = predictor(batch)
+            validate_prediction(pred, len(batch), patch_points * 4)
+            predictions.append(pred * scale[i:i + len(batch)] + center[i:i + len(batch)])
+        merged = torch.cat(predictions, 0).reshape(1, -1, 3)
         outputs.append(fps(merged, output_count))
     return validate_prediction(torch.cat(outputs), len(points), output_count)
 
@@ -131,6 +121,8 @@ def dataset(args, split, *, supervision=False):
         training_mode=args.training_mode, include_supervision=supervision,
         augment_rotation=split == "train",
         train_patches_per_object=getattr(args, "train_patches_per_object", DEFAULT_TRAIN_PATCHES_PER_OBJECT),
+        training_input_points=(1024 if split == "train" and getattr(args, "model_name", None) == "spu-imr"
+                               and getattr(args, "spu_profile", None) == "native" else None),
     )
 
 
@@ -144,6 +136,8 @@ def load_adapter(folder, args):
 def load_weights(adapter, path, args, *, resume=False):
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     saved_args = checkpoint.get("args", {}) if isinstance(checkpoint, dict) else {}
+    if args.model_name == "spu-imr" and checkpoint.get("protocol") == "V3":
+        saved_args = {"spu_profile": "legacy-patch256", "spu_transport": "hungarian", **saved_args}
     if saved_args.get("model_name") not in {None, args.model_name}:
         raise ValueError("Checkpoint belongs to a different comparison network")
     for name in adapter.compatibility_keys:
@@ -193,6 +187,7 @@ def train(adapter, args):
                         persistent_workers=args.workers > 0, drop_last=False)
     optimizer = make_optimizer(torch.optim.AdamW, adapter.parameters(), lr=args.lr,
                                weight_decay=args.weight_decay, fused=args.fused_optimizer)
+    scheduler = adapter.make_scheduler(optimizer, args) if hasattr(adapter, "make_scheduler") else None
     start = 0
     if args.resume:
         saved = load_weights(adapter, args.resume, args, resume=True)
@@ -204,6 +199,13 @@ def train(adapter, args):
                 raise ValueError(f"Resume cannot change {key}; use --checkpoint for a new fine-tuning stage")
         load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer,
                              disable_fused=getattr(args, "no_fused_optimizer", False))
+        if scheduler is not None:
+            if saved.get("scheduler") is None:
+                raise ValueError("Resume requires the saved native SPU scheduler; use a new stage for a changed recipe")
+            for key in ("spu_schedule_epochs", "spu_warmup_epochs"):
+                if saved.get("args", {}).get(key) != getattr(args, key):
+                    raise ValueError(f"Resume cannot change {key}")
+            scheduler.load_state_dict(saved["scheduler"])
         start = saved["epoch"] + 1
         if "rng" in saved:
             random.setstate(saved["rng"]["python"])
@@ -249,8 +251,11 @@ def train(adapter, args):
                     scores.append(chamfer(adapter.predict(x, 1024), g).item())
             val.close()
             result["validation_cd_model_coordinates"] = float(np.mean(scores))
+        if scheduler is not None:
+            scheduler.step(epoch)
         torch.save({"protocol": "V3", "training_profile": ds.training_profile,
                     "model": adapter.state_dict(), "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict() if scheduler is not None else None,
                     "epoch": epoch, "args": vars(args), "training": adapter.training_description,
                     "rng": {"python": random.getstate(), "numpy": np.random.get_state(),
                             "torch": torch.get_rng_state(),
@@ -325,10 +330,11 @@ def smoke(adapter, args):
     optimizer.step()
     adapter.eval()
     with torch.no_grad():
-        y = validate_prediction(adapter.predict(x, 1024), 1, 1024)
+        count = x.shape[1] * 4
+        y = validate_prediction(adapter.predict(x, count), 1, count)
     report = {"status": "passed", "model": args.model_name, "device": args.device,
               "loss": loss.item(), "gradient_parameters": len(gradients),
-              "input_points": 256, "prediction_points": y.shape[1],
+              "input_points": x.shape[1], "prediction_points": y.shape[1],
               "training": adapter.training_description, "inference": adapter.inference_description,
               "random_weights_smoke_only": True}
     if args.smoke_object:
@@ -383,13 +389,24 @@ def main(folder, model_name):
     parser.add_argument("--schedule-batches", type=int, default=0)
     parser.add_argument("--schedule-grid", type=int, default=51)
     parser.add_argument("--manifold-step", type=float, default=.01)
+    parser.add_argument("--fps-backend", choices=["auto", "cuda", "torch"], default="auto")
+    parser.add_argument("--patch-batch-size", type=int, default=1,
+                        help="PUFM++ patch batch size; 1 preserves the original V3 arithmetic path")
     parser.add_argument("--spu-passes", type=int, default=8)
-    parser.add_argument("--spu-groups", type=int, default=64)
+    parser.add_argument("--spu-profile", choices=["native", "legacy-patch256"], default="native")
+    parser.add_argument("--spu-groups", type=int, help="Native: 256; legacy patch256: 64")
+    parser.add_argument("--spu-transport", choices=["source", "hungarian"],
+                        help="Native defaults to source EMD; Hungarian is an explicit backend adaptation")
+    parser.add_argument("--spu-schedule-epochs", type=int, default=6000)
+    parser.add_argument("--spu-warmup-epochs", type=int, default=50)
     parser.add_argument("--octree-depth", type=int, default=8)
     parser.add_argument("--octree-scale", type=float, default=.5)
     parser.add_argument("--octree-beam", type=int, default=4)
     args = parser.parse_args()
     args.model_name = model_name
+    os.environ["V3_FPS_BACKEND"] = args.fps_backend
+    if args.patch_batch_size < 1 or args.spu_schedule_epochs < 1 or not 0 <= args.spu_warmup_epochs < args.spu_schedule_epochs:
+        parser.error("Invalid patch batch size or SPU schedule/warmup horizon")
     if args.command == "predict" and args.split != "official" and not args.condition:
         parser.error("predict requires one --condition so its NPZ matches the common evaluator")
     if args.command == "train" and args.output.endswith(".json"):

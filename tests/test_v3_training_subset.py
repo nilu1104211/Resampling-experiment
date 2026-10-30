@@ -112,6 +112,8 @@ class TrainingSubsetTests(unittest.TestCase):
         changed = dict(profile32, training_mode="clean")
         with self.assertRaises(ValueError):
             require_training_profile({"training_profile": changed}, profile32)
+        with self.assertRaisesRegex(ValueError, "observation point budget"):
+            require_training_profile({"training_profile": profile32}, dict(profile32, input_points=1024))
 
     def test_comparison_checkpoint_records_and_enforces_training_profile(self):
         import torch
