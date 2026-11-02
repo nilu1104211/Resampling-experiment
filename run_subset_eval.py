@@ -2,8 +2,9 @@
 """Bounded, reproducible V3 subset evaluation. Copy this file to the repo root.
 
 Default: 80 PU1K whole objects + 80 ModelNet40 whole objects, 7 conditions,
-2 models = 2240 predictions, all 2048 -> 8192 points. ModelNet40 uses a frozen
-test-only supplement; original V3 data is unchanged. PUFM++ shares ONE existing
+2 models = 2240 predictions, all 2048 -> 8192 points. Ours can be selected with
+--models ours, or paired with PUFM using --models pufm ours. ModelNet40 uses a
+frozen test-only supplement; original V3 data is unchanged. PUFM++ shares ONE existing
 schedule or one separately labelled 256-training-patch calibration.
 Only the standard library is needed for --phase plan.
 """
@@ -30,6 +31,7 @@ CONDITIONS = ["A0_normal", "B2_sparse_mid", "C2_hole_10", "D2_noise_005",
 CHECKPOINTS = {
     "pufm": "server_runs/patch32/pufm_baseline_b8_w0_a8_fused/epoch_0030.pt",
     "pufmpp": "server_runs/patch32/pufmpp_s2_b8_w0_fused/last.pt",
+    "ours": "server_runs/patch32/ours_rgr_mgb_b8_w0_a8_fused_seed21/full/last.pt",
 }
 
 
@@ -142,7 +144,7 @@ def make_plan(args):
             "selection": selection, "selection_sha256": signature(selection),
             "predictions_per_model": per_model, "total_predictions": per_model * len(args.models),
             "p2f": args.p2f, "device": args.device,
-            "checkpoints": {model: str((args.pufm_checkpoint if model == "pufm" else args.pufmpp_checkpoint).resolve()) for model in args.models},
+            "checkpoints": {model: str(getattr(args, f"{model}_checkpoint").resolve()) for model in args.models},
             "calibration": {"scope": "external_schedule" if args.schedule else "fixed_training_subset",
                             "external_schedule": str(args.schedule.resolve()) if args.schedule else None,
                             "samples": args.calibration_samples, "training_samples_available": training_count,
@@ -293,11 +295,21 @@ def print_suite(suite):
 
 
 def check_checkpoint(saved, model):
+    if model not in CHECKPOINTS:
+        raise ValueError(f"Unknown model: {model}")
     if saved.get("protocol") != "V3" or saved.get("epoch") != 29:
         raise ValueError(f"{model} must be a completed V3 30-epoch stage endpoint")
     if model == "pufmpp":
         if saved.get("args", {}).get("stage") != "s2" or saved.get("result", {}).get("partial_debug_run", True):
             raise ValueError("PUFM++ requires a non-debug S2 checkpoint")
+    elif model == "ours":
+        config = saved.get("configuration", {})
+        if saved.get("stage") != "joint" or saved.get("partial_debug_run", True):
+            raise ValueError("Ours requires a non-debug joint checkpoint, not an RGR/GainNet intermediate")
+        if not config.get("use_rgr", False) or config.get("allocation") != "gain":
+            raise ValueError("Selected Ours checkpoint must retain its trained RGR + MGB configuration")
+        if not {"baseline", "rgr", "gain", "joint"}.issubset(saved.get("trained_stages", [])):
+            raise ValueError("Ours checkpoint is missing baseline/RGR/GainNet/joint training history")
     else:
         config = saved.get("configuration", {})
         if saved.get("stage") != "baseline" or saved.get("partial_debug_run", True):
@@ -445,19 +457,21 @@ def import_file(name, path):
 def load_network(plan, model):
     import torch
     checkpoint = plan["checkpoints"][model]
-    if model == "pufm":
+    if model in {"pufm", "ours"}:
         folder = Path(plan["pufm_root"])
         sys.path.insert(0, str(folder))
         entry = import_file("subset_pufm_entry", folder / "adaptive_v3.py")
         values = {key: None for key in ("preset", "regions", "capacity", "minimum", "flow_steps", "swap_step",
                                        "swap_iterations", "allocation", "backbone", "resume")}
         values.update({key: False for key in ("no_virtual", "no_reliability", "no_recovery", "no_uncertainty", "allow_debug")})
-        args = SimpleNamespace(**values, checkpoint=checkpoint, command="predict", stage="baseline", device=plan["device"])
+        args = SimpleNamespace(**values, checkpoint=checkpoint, command="predict",
+                               stage="joint" if model == "ours" else "baseline", device=plan["device"])
         entry.seed_all(plan["seed"])
         network, saved = entry.create_model(args)
         del saved
         gc.collect()
         network.eval()
+        print(f"{model} saved configuration: {vars(network.config)}", flush=True)
         def predict(points, count):
             return network.integrate(network.prepare(points, count))
         return network, predict, None
@@ -767,7 +781,7 @@ def main():
     parser.add_argument("--patches-per-object", type=int,
                         help="Legacy patch-only tasks; whole-object tasks always have one record per object")
     parser.add_argument("--conditions", nargs="+", default=CONDITIONS)
-    parser.add_argument("--models", nargs="+", choices=["pufm", "pufmpp"], default=["pufm", "pufmpp"])
+    parser.add_argument("--models", nargs="+", choices=list(CHECKPOINTS), default=["pufm", "pufmpp"])
     parser.add_argument("--seed", type=int, default=21)
     parser.add_argument("--calibration-samples", type=int, default=256)
     parser.add_argument("--schedule", type=Path, help="Existing full schedule with its original evaluation_manifest.json")
@@ -778,7 +792,9 @@ def main():
                         help="PUFM++ patch batching; keep 1 for validated serial numerical equivalence")
     parser.add_argument("--pufm-checkpoint", type=Path, default=Path(CHECKPOINTS["pufm"]))
     parser.add_argument("--pufmpp-checkpoint", type=Path, default=Path(CHECKPOINTS["pufmpp"]))
-    parser.add_argument("--worker", choices=["pufm", "pufmpp"], help=argparse.SUPPRESS)
+    parser.add_argument("--ours-checkpoint", type=Path, default=Path(CHECKPOINTS["ours"]),
+                        help="Completed RGR + MGB joint checkpoint; configuration is loaded unchanged")
+    parser.add_argument("--worker", choices=list(CHECKPOINTS), help=argparse.SUPPRESS)
     parser.add_argument("--job-manifest", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.patch_batch_size < 1:
@@ -788,7 +804,7 @@ def main():
         return
     # Resolve repository-relative arguments consistently even when invoked elsewhere.
     args.repo = args.repo.resolve()
-    for name in ("output", "pufm_checkpoint", "pufmpp_checkpoint", "root", "schedule", "whole_data_root"):
+    for name in ("output", "pufm_checkpoint", "pufmpp_checkpoint", "ours_checkpoint", "root", "schedule", "whole_data_root"):
         path = getattr(args, name)
         if path is not None and not path.is_absolute():
             setattr(args, name, args.repo / path)
