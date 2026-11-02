@@ -68,6 +68,10 @@ class OursSubsetTests(unittest.TestCase):
             ours = runner.make_suite(args)
             args.models = ["pufm"]
             baseline = runner.make_suite(args)
+            args.models = ["spu"]
+            spu = runner.make_suite(args)
+            self.assertEqual(spu["total_predictions"], 1120)
+            self.assertEqual(spu["calibration_runs"], 0)
             self.assertEqual(ours["total_predictions"], 1120)
             self.assertEqual(ours["calibration_runs"], 0)
             self.assertEqual(ours["splits"], ["pu1k_object", "modelnet40_object"])
@@ -77,6 +81,12 @@ class OursSubsetTests(unittest.TestCase):
                 self.assertEqual(actual["conditions"], reference["conditions"])
                 self.assertEqual(actual["selection"]["samples_per_condition"], 80)
                 self.assertEqual(list(actual["checkpoints"]), ["ours"])
+            for actual, reference in zip(spu["plans"], baseline["plans"]):
+                self.assertEqual(actual["selection"], reference["selection"])
+                self.assertEqual(actual["selection_sha256"], reference["selection_sha256"])
+                self.assertEqual(actual["conditions"], reference["conditions"])
+                self.assertEqual(actual["inference_runtime"]["spu"], runner.SPU_INFERENCE)
+                self.assertEqual(list(actual["checkpoints"]), ["spu"])
 
     def test_loader_inherits_saved_configuration_and_keeps_input_only_inference(self):
         observed = object()

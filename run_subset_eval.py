@@ -3,7 +3,8 @@
 
 Default: 80 PU1K whole objects + 80 ModelNet40 whole objects, 7 conditions,
 2 models = 2240 predictions, all 2048 -> 8192 points. Ours can be selected with
---models ours, or paired with PUFM using --models pufm ours. ModelNet40 uses a
+--models ours, or paired with PUFM using --models pufm ours. SPU-IMR uses
+--models spu and its completed shared-v3 60-epoch checkpoint. ModelNet40 uses a
 frozen test-only supplement; original V3 data is unchanged. PUFM++ shares ONE existing
 schedule or one separately labelled 256-training-patch calibration.
 Only the standard library is needed for --phase plan.
@@ -32,7 +33,10 @@ CHECKPOINTS = {
     "pufm": "server_runs/patch32/pufm_baseline_b8_w0_a8_fused/epoch_0030.pt",
     "pufmpp": "server_runs/patch32/pufmpp_s2_b8_w0_fused/last.pt",
     "ours": "server_runs/patch32/ours_rgr_mgb_b8_w0_a8_fused_seed21/full/last.pt",
+    "spu": "server_runs/patch32/spu_shared256_b8_w0_cos60_seed21/last.pt",
 }
+SPU_INFERENCE = {"spu_profile": "shared-v3", "spu_groups": 64,
+                 "spu_transport": "source", "spu_passes": 8}
 
 
 def read_json(path):
@@ -158,6 +162,8 @@ def make_plan(args):
         path = supplement / "manifest.json"
         plan["whole_data_root"] = str(supplement)
         plan["supplement_manifest_sha256"] = file_hash(path) if path.is_file() else None
+    if "spu" in args.models:
+        plan["inference_runtime"]["spu"] = dict(SPU_INFERENCE)
     return plan
 
 
@@ -297,11 +303,21 @@ def print_suite(suite):
 def check_checkpoint(saved, model):
     if model not in CHECKPOINTS:
         raise ValueError(f"Unknown model: {model}")
-    if saved.get("protocol") != "V3" or saved.get("epoch") != 29:
-        raise ValueError(f"{model} must be a completed V3 30-epoch stage endpoint")
+    epochs = 60 if model == "spu" else 30
+    if saved.get("protocol") != "V3" or saved.get("epoch") != epochs - 1:
+        raise ValueError(f"{model} must be a completed V3 {epochs}-epoch stage endpoint")
     if model == "pufmpp":
         if saved.get("args", {}).get("stage") != "s2" or saved.get("result", {}).get("partial_debug_run", True):
             raise ValueError("PUFM++ requires a non-debug S2 checkpoint")
+    elif model == "spu":
+        args = saved.get("args", {})
+        if args.get("model_name") != "spu-imr" or saved.get("result", {}).get("partial_debug_run", True) or args.get("max_batches", 0):
+            raise ValueError("SPU-IMR requires a completed non-debug training checkpoint, not smoke output")
+        for key, expected in SPU_INFERENCE.items():
+            if args.get(key) != expected:
+                raise ValueError(f"SPU checkpoint {key}={args.get(key)!r}; expected {expected!r}")
+        if args.get("training_mode") != "mixed":
+            raise ValueError("SPU main comparison requires the shared mixed training inputs")
     elif model == "ours":
         config = saved.get("configuration", {})
         if saved.get("stage") != "joint" or saved.get("partial_debug_run", True):
@@ -352,7 +368,7 @@ def preflight(plan):
         del saved
         gc.collect()
         plan["checkpoint_sha256"][model] = file_hash(path)
-        print(f"Checked {model}: completed, non-debug 30-epoch stage", flush=True)
+        print(f"Checked {model}: completed, non-debug {60 if model == 'spu' else 30}-epoch stage", flush=True)
     plan["environment"] = {"python": sys.version, "torch": str(torch.__version__),
                            "torch_cuda": torch.version.cuda, "numpy": numpy.__version__,
                            "scipy": scipy.__version__, "h5py": h5py.__version__}
@@ -362,6 +378,10 @@ def preflight(plan):
     for folder in (Path(plan["repo"]) / "adaptive_resampling", Path(plan["pufm_root"]) / "models",
                    Path(plan["comparison_root"]) / "Enhanced_PUFM-main/models"):
         sources.extend(folder.rglob("*.py"))
+    if "spu" in plan["models"]:
+        spu_root = Path(plan["comparison_root"]) / "spu-imr-main"
+        sources.extend(spu_root.rglob("*.py"))
+        sources.append(spu_root / "cfgs/setting.yaml")
     plan["source_sha256"] = signature({str(path): file_hash(path) for path in sorted(set(sources))})
     plan["raw_root"] = os.environ.get("V3_RAW_ROOT") if plan["p2f"] else None
     if plan["calibration"]["external_schedule"] and "pufmpp" in plan["models"]:
@@ -476,6 +496,25 @@ def load_network(plan, model):
             return network.integrate(network.prepare(points, count))
         return network, predict, None
     folder = Path(plan["comparison_root"])
+    if model == "spu":
+        sys.path.insert(0, str(folder))
+        sys.path.insert(0, str(folder / "spu-imr-main"))
+        common = import_file("v3_common", folder / "v3_common.py")
+        runtime = dict(plan.get("inference_runtime", {}).get("spu", SPU_INFERENCE))
+        if runtime != SPU_INFERENCE:
+            raise ValueError("SPU inference settings differ from the checked shared-v3 recipe")
+        args = SimpleNamespace(command="predict", model_name="spu-imr", device=plan["device"], **runtime)
+        common.set_seed(plan["seed"])
+        network = common.load_adapter(folder / "spu-imr-main", args)
+        saved = common.load_weights(network, checkpoint, args)
+        check_checkpoint(saved, model)
+        del saved
+        gc.collect()
+        network.eval()
+        print(f"SPU-IMR inference configuration: {runtime}", flush=True)
+        return network, network.predict, common
+    if model != "pufmpp":
+        raise ValueError(f"Unknown model: {model}")
     sys.path.insert(0, str(folder / "Enhanced_PUFM-main"))
     sys.path.insert(0, str(folder))
     common = import_file("v3_common", folder / "v3_common.py")
@@ -794,6 +833,8 @@ def main():
     parser.add_argument("--pufmpp-checkpoint", type=Path, default=Path(CHECKPOINTS["pufmpp"]))
     parser.add_argument("--ours-checkpoint", type=Path, default=Path(CHECKPOINTS["ours"]),
                         help="Completed RGR + MGB joint checkpoint; configuration is loaded unchanged")
+    parser.add_argument("--spu-checkpoint", type=Path, default=Path(CHECKPOINTS["spu"]),
+                        help="Completed shared-v3/source SPU-IMR 60-epoch checkpoint")
     parser.add_argument("--worker", choices=list(CHECKPOINTS), help=argparse.SUPPRESS)
     parser.add_argument("--job-manifest", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -804,7 +845,7 @@ def main():
         return
     # Resolve repository-relative arguments consistently even when invoked elsewhere.
     args.repo = args.repo.resolve()
-    for name in ("output", "pufm_checkpoint", "pufmpp_checkpoint", "ours_checkpoint", "root", "schedule", "whole_data_root"):
+    for name in ("output", "pufm_checkpoint", "pufmpp_checkpoint", "ours_checkpoint", "spu_checkpoint", "root", "schedule", "whole_data_root"):
         path = getattr(args, name)
         if path is not None and not path.is_absolute():
             setattr(args, name, args.repo / path)
