@@ -14,7 +14,7 @@ Linux 服务器使用新增的 `run_v3.sh`；路径迁移、分段保存候选�
 |---|---|---|
 | PUFM++ | 原 RIN：6 个 RCW block、每 block 4 层 compute、256 个 latent、z_dim=512、x_dim=512；s1 FM 与 s2 Chamfer 微调 | 初始化只来自实际退化输入；修复 GlobalNet 的 FPS 接口和特征索引维度；训练使用 1024 个 query；整物体使用 256 点观测 Patch 分别生成并还原合并；s3 在训练集校准时间调度 |
 | SPU-IMR | 原三次迭代 Mask-recovery、Transformer、原自监督恢复目标 | 主对比 `shared-v3` 严格读取相同 256 点输入，64 个中心×16 点，保留 8 次恢复和密度过滤，不在过滤前去重；最终 FPS 为 1024 点，整物体合并为 8192 点；保留源 EMD 与 cosine，历史 native-1024 仅用于独立推理参考 |
-| OUNet | 原八叉树 CNN，逐层占用分类与叶节点位移回归 | 用固定 0.5 缩放替代原乘 1.7 后裁剪；输入与 GT 使用同一变换，越界报错而不裁点；推理按占用得分选叶节点，最终恰好 M 个，无复制点补齐 |
+| OUNet | 原八叉树 CNN，逐层占用分类与叶节点位移回归，AdamW + poly 调度 | 用固定 0.5 缩放替代原乘 1.7 后裁剪；输入与 GT 使用同一变换，越界报错而不裁点；推理按占用得分选叶节点，最终恰好 M 个，无复制点补齐 |
 
 **训练目标的区别必须在论文中披露：** SPU-IMR 保持自监督，其恢复目标来自实际输入内部的被遮挡邻域，不使用 V3 干净 GT 计算损失。因此 mixed 训练中的噪声也可能被其重建；这是原目标在该任务上的适配结果，不能称为与另两种方法相同的干净 GT 监督。所有方法共享数据划分、实际观测、退化协议和评价。
 
@@ -57,7 +57,7 @@ PUFM++ 保留基于真实输入的回投约束（默认步长 0.01），不裁�
 .\run_v3.ps1 pufmpp schedule --checkpoint v3_runs/pufmpp_s2/last.pt --flow-steps 6 --output v3_runs/pufmpp_schedule.pt
 
 .\run_v3.ps1 spu-imr train --spu-profile shared-v3 --spu-transport source --epochs 60 --spu-schedule-epochs 60 --spu-warmup-epochs 5 --batch-size 8 --workers 0 --training-mode mixed --output v3_runs/spu_shared256
-.\run_v3.ps1 ounet train --epochs 60 --batch-size 2 --workers 2 --training-mode mixed --output v3_runs/ounet
+.\run_v3.ps1 ounet train --epochs 60 --ounet-schedule-epochs 60 --ounet-poly-power 0.9 --batch-size 2 --workers 2 --training-mode mixed --output v3_runs/ounet
 
 # 续训使用 --resume，--epochs 表示总轮数。
 .\run_v3.ps1 spu-imr train --spu-profile shared-v3 --spu-transport source --resume v3_runs/spu_shared256/last.pt --epochs 60 --spu-schedule-epochs 60 --spu-warmup-epochs 5 --batch-size 8 --workers 0 --output v3_runs/spu_shared256
@@ -72,6 +72,8 @@ PUFM++ 保留基于真实输入的回投约束（默认步长 0.01），不裁�
 ```
 
 训练入口默认只保存可恢复的 `last.pt` 与 `train.jsonl`。`--validation-samples N` 可做验证监控；它不是物体级正式汇总，也不自动选出 best checkpoint。正式比较时应使用完整独立验证集选择 checkpoint，固定后再测试。可通过 `--epochs` 与 `--resume` 分段训练、保存候选 checkpoint。
+
+OUNet 使用无 warmup 的 `lr = lr0 * (1 - e / H)^p`，`e` 是已完成轮数；每轮结束后更新并保存下一轮学习率，默认 `p=0.9`。`--ounet-schedule-epochs H` 不填时等于本次 `--epochs`；分段训练必须从第一段起显式指定完整 horizon，并在续训时保持不变。`--resume` 同时校验 horizon、power、初始 LR、weight decay 和 batch size，恢复优化器、调度器及 RNG；旧的无调度 OUNet 权重只能用 `--checkpoint` 开始新阶段。`train.jsonl` 的 `lr` 是本轮实际学习率，`next_lr` 是保存后的下一轮学习率。带 `partial_debug_run` 的 checkpoint 不能直接 `--resume` 成正式完整训练。服务器短训命令和本机验证记录见 [OUNet poly 调度与短训](../docs/OUNet_poly调度与短训_2026-11-02.md)。
 
 `--max-batches`、`--limit`、`--schedule-batches` 只用于调试，输出记录 `partial_debug_run`；校准出的调试 schedule 会被正式推理拒绝。`--spu-groups`、`--octree-scale`、`--octree-depth` 与对应权重必须一致。若新输入范围超出八叉树域，应统一调小整次实验的固定 scale 后重训，不能对每个预测单独改尺度。
 

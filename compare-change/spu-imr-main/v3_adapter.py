@@ -9,6 +9,7 @@ from v3_common import fps, patch_predict, validate_prediction
 
 
 class Adapter(nn.Module):
+    scheduler_resume_keys = ("spu_schedule_epochs", "spu_warmup_epochs")
     compatibility_keys = ("spu_profile", "spu_groups", "spu_transport")
     training_description = "Original SPU-IMR iterative masked recovery on actual input only (including its degradation); no clean GT loss; exact transport backend"
     inference_description = "Repeated native masked recovery; source density filter; FPS to 4x; normalized input patches for objects"

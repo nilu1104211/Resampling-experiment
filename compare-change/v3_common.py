@@ -194,6 +194,8 @@ def train(adapter, args):
         if saved.get("protocol") != "V3":
             raise ValueError("Resume requires a V3 training checkpoint")
         require_training_profile(saved, ds.training_profile)
+        if (saved.get("result", {}).get("partial_debug_run") or saved.get("args", {}).get("max_batches")) and not args.max_batches:
+            raise ValueError("Resume cannot turn a partial debug checkpoint into a formal run; start a new run")
         for key in ["training_mode"] + (["stage"] if args.model_name == "pufm++" else []):
             if saved.get("args", {}).get(key) != getattr(args, key):
                 raise ValueError(f"Resume cannot change {key}; use --checkpoint for a new fine-tuning stage")
@@ -201,10 +203,12 @@ def train(adapter, args):
                              disable_fused=getattr(args, "no_fused_optimizer", False))
         if scheduler is not None:
             if saved.get("scheduler") is None:
-                raise ValueError("Resume requires the saved native SPU scheduler; use a new stage for a changed recipe")
-            for key in ("spu_schedule_epochs", "spu_warmup_epochs"):
+                raise ValueError(f"Resume requires the saved {args.model_name} scheduler; use --checkpoint for a new stage")
+            for key in getattr(adapter, "scheduler_resume_keys", ()):
                 if saved.get("args", {}).get(key) != getattr(args, key):
-                    raise ValueError(f"Resume cannot change {key}")
+                    raise ValueError(f"Resume cannot change {key}; keep the original recipe or use --checkpoint for a new stage")
+            if args.model_name == "ounet" and saved["scheduler"].get("last_epoch") != saved["epoch"] + 1:
+                raise ValueError("OUNet scheduler progress does not match the saved completed epoch")
             scheduler.load_state_dict(saved["scheduler"])
         start = saved["epoch"] + 1
         if "rng" in saved:
@@ -217,13 +221,17 @@ def train(adapter, args):
         load_weights(adapter, args.checkpoint, args)
     print(json.dumps({"runtime": {"start_epoch_zero_based": start, "loader_workers": args.workers,
                                   "assignment_workers": getattr(args, "assignment_workers", 1),
-                                  "fused_optimizer": any(bool(g.get("fused")) for g in optimizer.param_groups)}}), flush=True)
+                                  "fused_optimizer": any(bool(g.get("fused")) for g in optimizer.param_groups),
+                                  "scheduler": type(scheduler).__name__ if scheduler is not None else None,
+                                  "scheduler_config": {key: getattr(args, key) for key in getattr(adapter, "scheduler_resume_keys", ())},
+                                  "lr": optimizer.param_groups[0]["lr"]}}), flush=True)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     for epoch in range(start, args.epochs):
         sampler.set_epoch(epoch)
         adapter.train()
         losses = []
+        epoch_lr = optimizer.param_groups[0]["lr"]
         for step, batch in enumerate(loader):
             points, gt = tensor_batch(batch, args.device)
             optimizer.zero_grad(set_to_none=True)
@@ -234,10 +242,10 @@ def train(adapter, args):
             optimizer.step()
             losses.append(loss.item())
             if step % args.log_every == 0:
-                print(json.dumps({"epoch": epoch, "step": step, "loss": loss.item()}), flush=True)
+                print(json.dumps({"epoch": epoch, "step": step, "loss": loss.item(), "lr": epoch_lr}), flush=True)
             if args.max_batches and step + 1 >= args.max_batches:
                 break
-        result = {"epoch": epoch, "loss": float(np.mean(losses)), "batches": len(losses),
+        result = {"epoch": epoch, "loss": float(np.mean(losses)), "batches": len(losses), "lr": epoch_lr,
                   "partial_debug_run": bool(args.max_batches)}
         if args.validation_samples:
             adapter.eval()
@@ -252,7 +260,11 @@ def train(adapter, args):
             val.close()
             result["validation_cd_model_coordinates"] = float(np.mean(scores))
         if scheduler is not None:
-            scheduler.step(epoch)
+            if getattr(adapter, "scheduler_step_with_epoch", True):
+                scheduler.step(epoch)
+            else:
+                scheduler.step()
+        result["next_lr"] = optimizer.param_groups[0]["lr"]
         torch.save({"protocol": "V3", "training_profile": ds.training_profile,
                     "model": adapter.state_dict(), "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict() if scheduler is not None else None,
@@ -402,8 +414,18 @@ def main(folder, model_name):
     parser.add_argument("--octree-depth", type=int, default=8)
     parser.add_argument("--octree-scale", type=float, default=.5)
     parser.add_argument("--octree-beam", type=int, default=4)
+    parser.add_argument("--ounet-schedule-epochs", type=int,
+                        help="OUNet poly horizon; defaults to --epochs. Keep this fixed across staged resumes")
+    parser.add_argument("--ounet-poly-power", type=float, default=.9,
+                        help="OUNet non-warmup poly exponent (thsolver default: 0.9)")
     args = parser.parse_args()
     args.model_name = model_name
+    if model_name == "ounet" and args.command == "train":
+        if args.ounet_schedule_epochs is None:
+            args.ounet_schedule_epochs = args.epochs
+        if (args.ounet_schedule_epochs < 1 or args.epochs > args.ounet_schedule_epochs
+                or not math.isfinite(args.ounet_poly_power) or args.ounet_poly_power <= 0):
+            parser.error("OUNet requires 1 <= --epochs <= --ounet-schedule-epochs and finite positive --ounet-poly-power")
     if model_name == "spu-imr" and args.spu_profile == "native" and args.command != "predict":
         parser.error("The native-1024 profile is historical inference only. Shared training/smoke requires --spu-profile shared-v3 (256 input, 1024 output)")
     os.environ["V3_FPS_BACKEND"] = args.fps_backend

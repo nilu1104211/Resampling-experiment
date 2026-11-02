@@ -8,6 +8,7 @@ import ocnn
 from ocnn.octree import Octree, Points, merge_octrees
 from model import OUNet
 from v3_common import validate_prediction
+from adaptive_resampling.v3_scheduler import OUNetPolyLR
 
 
 class BudgetOUNet(OUNet):
@@ -51,6 +52,8 @@ class BudgetOUNet(OUNet):
 
 class Adapter(nn.Module):
     compatibility_keys = ("octree_depth", "octree_scale")
+    scheduler_resume_keys = ("ounet_schedule_epochs", "ounet_poly_power", "lr", "weight_decay", "batch_size")
+    scheduler_step_with_epoch = False
     training_description = "Native OUNet occupancy cross-entropy + local displacement regression; common V3 input/clean GT; fixed input-only scale, no clipping"
     inference_description = "OUNet with budget-constrained confidence-ranked leaf splitting; exactly M leaves; ancestor beam disclosed; no repeated-point padding"
 
@@ -65,6 +68,9 @@ class Adapter(nn.Module):
                                 resblk_num=2, bottleneck=2)
         self.model = BudgetOUNet(flags)
         self.model.budget_beam = args.octree_beam
+
+    def make_scheduler(self, optimizer, args):
+        return OUNetPolyLR(optimizer, args.ounet_schedule_epochs, args.ounet_poly_power)
 
     def build_octree(self, points, *, features):
         scaled = points * self.args.octree_scale
