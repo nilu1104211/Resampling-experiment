@@ -1,0 +1,65 @@
+{
+  "status": "passed",
+  "scope": "Implementation and short engineering checks only; not a trained-performance or novelty proof",
+  "environment": {
+    "python": "D:/Anaconda/envs/pufm/python.exe",
+    "torch": "2.5.1",
+    "pointops": "installed original CUDA kernels on GPU; torch fallback on CPU"
+  },
+  "checks": {
+    "unit_contract_tests": 8,
+    "AST": "passed",
+    "original_PUFM_parameter_shapes": "retained",
+    "original_midpoint_baseline_initializer_exact_match": "passed",
+    "CPU_baseline_forward": "passed",
+    "GPU_full_model_forward_backward": "passed",
+    "separate_nonzero_gradient_modules": [
+      "flow",
+      "rgr",
+      "gain",
+      "conditioner"
+    ],
+    "V3_patch_output": 1024,
+    "V3_object_output": 8192,
+    "presets_finite_and_exact_budget": [
+      "baseline",
+      "rgr",
+      "rule",
+      "static",
+      "mgb",
+      "rgr_static",
+      "full",
+      "full_condition"
+    ],
+    "batch_size_2": "passed",
+    "degenerate_input_finite_count": "passed; distinct coordinates not guaranteed",
+    "train_workers": 2,
+    "baseline_training_short_step": "passed",
+    "RGR_training_short_step": "passed",
+    "teacher_construction_train_only": "passed",
+    "teacher_online_epochs_checked": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "gain_head_cache_training": "passed",
+    "gain_checkpoint_resume": "passed",
+    "joint_training_with_condition_and_retention": "passed",
+    "stale_teacher_rejection": "passed",
+    "validation_teacher_rejection": "passed",
+    "NPZ_ID_paired_prediction": "passed",
+    "common_evaluation_exact_mesh_P2F": "passed on 2 debug samples",
+    "heldout_gain_diagnosis_interface": "passed; tiny debug result is not evidence of generalization"
+  },
+  "limitations": [
+    "No formal long training completed",
+    "No static-vs-MGB performance conclusion",
+    "Novelty not established by implementation",
+    "RGR recoverability/risk labels are weak geometric proxies",
+    "Positive decreasing separable marginal curves are a hypothesis",
+    "Exact Hungarian backend differs from original approximate EMD implementation",
+    "Initial retained anchor count remains N, including severely corrupted points"
+  ]
+}
