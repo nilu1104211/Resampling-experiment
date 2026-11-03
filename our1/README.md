@@ -15,6 +15,28 @@ GDB 保留修正后的输入锚点，再分配 M−N 个新增点。每区先保
 
 候选由不同局部邻点对插值得到，使用逐点可靠性加权，恢复查询参与部分候选的位移。关系模块在 X0 上构建一次 8 近邻图，根据观测可靠性、恢复来源和恢复置信度混合三类消息，把关系特征和区域预算投影成 FiLM 参数，在每次积分的速度预测头内调制特征。区域预算记录生成来源，实际覆盖按最终坐标重新计数。
 
+## 自动接续训练
+
+在服务器激活 `scdata-v3` 后，可一次启动整个训练流程。程序先等待当前项目中已有的训练进程结束，再依次执行 RGR 20 轮、训练教师、GainNet 60 轮、三种验证条件的收益诊断、联合训练 30 轮。每阶段成功结束后自动进入下一阶段。诊断报告保存后自动继续联合训练，最终效果由完整验证和正式测试判断。
+
+```bash
+cd /home/zk/baseline_compare
+conda activate scdata-v3
+export RUN=/home/zk/baseline_compare/server_runs/patch32/ours1_gdb_flow
+mkdir -p "$RUN"
+nohup python -u -B our1/train_pipeline.py \
+  --root /home/zk/baseline_compare/adaptive_resampling_data_v3 \
+  --output "$RUN" >> "$RUN/pipeline.console.log" 2>&1 < /dev/null &
+echo $! > "$RUN/pipeline.pid"
+tail -n 40 "$RUN/pipeline.console.log"
+```
+
+主日志会实时合并各阶段输出，各阶段另有自己的日志。RGR、GainNet、联合训练分别写入 `rgr/console.log`、`gain/console.log`、`joint/console.log`。成功时主日志末尾打印 `PIPELINE COMPLETE` 和最终 best 路径，失败时打印 `PIPELINE FAILED`，后续阶段停止。
+
+重新执行同一启动命令时，程序检查已有检查点。已完整训练并选出 best 的阶段会跳过，有有效中间 `last.pt` 的阶段从保存状态续训。已完成但尚未选择 best 的 RGR 会先补选。目录锁会阻止两个流水线同时写同一个运行目录。输入指纹用于检查父权重、数据和生成器代码是否在阶段之间发生变化。手动启动的 RGR 可以接入，手动启动的 GainNet 和联合训练需要使用各自已有命令管理，自动流程要求它们具有流水线输入记录。
+
+默认从既有共同 PUFM 第 60 轮开始，下一阶段加载上一阶段的 `best.pt`。另起一组实验时，指定新的 `--output` 目录。
+
 ## 分阶段训练
 
 ```bash
