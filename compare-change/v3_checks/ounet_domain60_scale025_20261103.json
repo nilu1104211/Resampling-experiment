@@ -1,0 +1,29 @@
+{
+  "status": "passed",
+  "check": "rotation-invariant conservative radius bound, including float32 slack",
+  "epochs": 60,
+  "octree_scale": 0.25,
+  "training_profile": {
+    "policy": "per-object-seeded-subset-v1",
+    "patches_per_object": 32,
+    "objects": 797,
+    "samples": 25504,
+    "source_samples": 51008,
+    "selection_sha256": "0092df848562dfb8ccf772113e425405faa9da7f34320914797f9b408fe7a739",
+    "source_config_digest": "518601fcbad72f8dd8fab97f2bce5f6442d86f1bc9f8cfa86681472cbcfdb994",
+    "training_mode": "mixed"
+  },
+  "observations_checked": 1530240,
+  "conservative_violations": 0,
+  "worst": {
+    "radius_bound": 2.5916598826203967,
+    "base_id": "pu1k/03759954.fa06eacff134fbcd59a6208793b9dfca/train/patch_049",
+    "dataset_index": 16314,
+    "source_index": 32625,
+    "epoch": 59,
+    "condition": "online_mixed"
+  },
+  "worst_scaled_radius_bound": 0.6479149706550992,
+  "scale_for_10_percent_domain_margin": 0.3472677900504524,
+  "seconds": 505.3
+}

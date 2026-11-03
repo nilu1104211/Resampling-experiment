@@ -140,7 +140,7 @@ def training_condition(base_id, index, epoch, mode="mixed"):
                                 noise_fraction=fraction, outlier_fraction=outliers)
 
 
-def corrupt_base(base, condition, *, spec=None, epoch=None):
+def corrupt_base(base, condition, *, spec=None, epoch=None, coordinates_only=False):
     config = dict(CONDITIONS[condition] if spec is None else spec)
     kind = int(config["kind"])
     pool = base["pool_xyz"]
@@ -196,6 +196,10 @@ def corrupt_base(base, condition, *, spec=None, epoch=None):
         noisy[ids] += (directions * rng.uniform(0.05, 0.15, (len(ids), 1))).astype("f4")
         outlier_mask[ids] = True
         noise_mask[ids] = True
+    if coordinates_only:
+        # Domain preflight needs the exact observations, not reference labels or
+        # quality metrics. Keep selection, perturbations and RNG identical.
+        return {"input_xyz": noisy.astype("f4"), "gt_xyz": base["gt_xyz"]}
     gt_hole = hole[base["gt_ref_index"]]
     gt_sparse = sparse[base["gt_ref_index"]]
     tree = cKDTree(pool)

@@ -74,8 +74,16 @@ class Adapter(nn.Module):
 
     def build_octree(self, points, *, features):
         scaled = points * self.args.octree_scale
-        if not torch.isfinite(scaled).all() or torch.any(scaled.abs() >= 1):
-            raise ValueError("OUNet coordinate outside (-1,1); lower --octree-scale consistently for the run. Points are never clipped.")
+        role = "input" if features else "GT"
+        if not torch.isfinite(scaled).all():
+            raise ValueError(f"OUNet {role} contains non-finite coordinates")
+        peaks = scaled.abs().flatten(1).amax(1)
+        if torch.any(peaks >= 1):
+            slots = (peaks >= 1).nonzero().flatten().tolist()
+            raise ValueError(f"OUNet {role} coordinate outside (-1,1): octree_scale={self.args.octree_scale}, "
+                             f"raw_max_abs={points.abs().max().item():.8g}, scaled_max_abs={peaks.max().item():.8g}, "
+                             f"batch_slots={slots}. Check the full planned training domain and lower "
+                             "--octree-scale consistently for a new run. Points are never clipped.")
         trees = []
         for cloud in scaled:
             feature = torch.zeros_like(cloud[:, :1]) if features else None

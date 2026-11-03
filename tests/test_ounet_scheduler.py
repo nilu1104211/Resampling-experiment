@@ -90,6 +90,21 @@ def run_training(args, seed=21):
 
 
 class OUNetSchedulerTests(unittest.TestCase):
+    def test_domain_errors_identify_role_scale_and_batch_slot_without_clipping(self):
+        args = arguments("unused")
+        adapter = TinyOUNet(args)
+        adapter.args = args
+        points = torch.tensor([[[0., 0., 0.], [2.0793188, 0., 0.]]])
+        original = points.clone()
+        with self.assertRaisesRegex(ValueError, r"GT coordinate.*octree_scale=0.5.*batch_slots=\[0\]"):
+            adapter.build_octree(points, features=False)
+        args.octree_scale = .25
+        tree = adapter.build_octree(points, features=False)
+        self.assertEqual(tree.depth, args.octree_depth)
+        torch.testing.assert_close(points, original, rtol=0, atol=0)
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            adapter.build_octree(points * float("nan"), features=True)
+
     def test_source_formula_epoch_boundaries_and_zero_after_horizon(self):
         parameter = nn.Parameter(torch.ones(()))
         optimizer = torch.optim.AdamW([parameter], lr=5e-4)

@@ -2,6 +2,8 @@
 
 日期：2026-11-02，北京时间。本次在 Windows 本机仓库修改和验证代码；服务器需同步本次代码后再执行新增命令。
 
+**2026-11-03 更新：** 用户已确定正式训练 60 轮、batch=8。服务器在 epoch 0 的第 1530 个 batch 暴露出 `octree_scale=0.5` 无法覆盖部分 GT 的问题；恢复训练方案与完整 60 轮坐标预检见 [OUNet 坐标域修复](OUNet坐标域修复_2026-11-03.md)。下面的调度机制仍适用，新的训练及推理统一显式使用 `--octree-scale 0.25`；11-02 本机短训记录保留为历史验证。
+
 ## 已确认的服务器环境
 
 用户提供的服务器输出已确认：`scdata-v3` 中 PyTorch `2.5.1+cu121`、ocnn `2.3.3`、RTX 3080 Ti 可用。CUDA smoke 的随机权重前向、反向、一步更新、256→1024 和整物体 8192 点输出通过。该记录不能代替 batch=8 连续训练检查，也不代表训练质量。
@@ -22,7 +24,7 @@
 
 ## 服务器连续短训
 
-先通过 Git 同步本次修改，再在服务器执行。这里的 `H=60` 仅用于短检查，不是确定正式长训轮数。若目录已有旧调试输出，换一个新的目录名。
+先通过 Git 同步本次修改，再在服务器执行。正式 horizon 已确定为 60；这里仍只跑两轮少量 batch 作为短检查。若目录已有旧调试输出，换一个新的目录名。
 
 ```bash
 conda activate scdata-v3
@@ -35,9 +37,9 @@ v3 ounet train \
   --training-mode mixed --train-patches-per-object 32 \
   --epochs 2 --ounet-schedule-epochs 60 --ounet-poly-power 0.9 \
   --lr 5e-4 --weight-decay 0.05 \
-  --octree-depth 8 --octree-scale 0.5 \
+  --octree-depth 8 --octree-scale 0.25 \
   --max-batches 20 --log-every 5 \
-  --output server_runs/debug/ounet_poly_b8_20261102
+  --output server_runs/debug/ounet_poly_b8_scale025_20261103
 ```
 
 应看到 `scheduler: OUNetPolyLR`，第一轮 `lr=0.0005`，第二轮 `lr≈0.0004924937115`，第二轮结束 `next_lr≈0.0004849746890`，两轮均为 `batches=20`、`partial_debug_run=true`。若 CUDA 显存不足，保留完整错误，并在新目录中把 batch 降为 4 重新检查。
@@ -51,10 +53,10 @@ v3 ounet train \
   --training-mode mixed --train-patches-per-object 32 \
   --epochs 3 --ounet-schedule-epochs 60 --ounet-poly-power 0.9 \
   --lr 5e-4 --weight-decay 0.05 \
-  --octree-depth 8 --octree-scale 0.5 \
+  --octree-depth 8 --octree-scale 0.25 \
   --max-batches 20 --log-every 5 \
-  --resume server_runs/debug/ounet_poly_b8_20261102/last.pt \
-  --output server_runs/debug/ounet_poly_b8_20261102
+  --resume server_runs/debug/ounet_poly_b8_scale025_20261103/last.pt \
+  --output server_runs/debug/ounet_poly_b8_scale025_20261103
 ```
 
 恢复日志应显示 `start_epoch_zero_based=2`、`lr≈0.0004849746890`，只增加第三轮。这只能继续作为调试记录。
@@ -63,7 +65,7 @@ v3 ounet train \
 
 例如仅为解释参数，若计划 `H=60`，第一段可用 `--epochs 5 --ounet-schedule-epochs 60`，第二段用 `--epochs 10 --ounet-schedule-epochs 60 --resume .../last.pt`。每段完成后可将 `last.pt` 复制为候选权重，再用独立验证集选模；入口没有自动 best 保存功能。
 
-正式轮数、batch 和验证方案需要结合服务器短训情况确定。正式命令不带 `--max-batches`，不使用本次调试 checkpoint，也不覆盖其他四模型目录。
+正式轮数为 60、batch=8；验证选模方案需另行记录。正式命令不带 `--max-batches`，不使用本次调试 checkpoint，也不覆盖其他四模型目录。
 
 ## 本机验证
 
