@@ -24,20 +24,45 @@ COMMON=server_runs/patch32/pufm_common_b8_w0_a8_fused/epoch_0060.pt
 RUN=server_runs/patch32/ours1_gdb_flow
 
 ours1 train --stage rgr --preset gdb --checkpoint "$COMMON" --batch-size 8 --epochs 20 --output "$RUN/rgr"
-ours1 build-teacher --checkpoint "$RUN/rgr/last.pt" --samples 128 --pairs 4 --teacher-epochs 0 1 2 3 4 --output "$RUN/teacher.npz"
-ours1 train-gain --checkpoint "$RUN/rgr/last.pt" --teacher "$RUN/teacher.npz" --epochs 60 --lr 1e-3 --output "$RUN/gain"
-ours1 evaluate-gain --checkpoint "$RUN/gain/last.pt" --split validation --condition C2_hole_10 --samples 32 --pairs 8 --compare-allocations --output "$RUN/validation_gain.json"
+ours1 build-teacher --checkpoint "$RUN/rgr/best.pt" --samples 128 --pairs 4 --teacher-epochs 0 1 2 3 4 --output "$RUN/teacher.npz"
+ours1 train-gain --checkpoint "$RUN/rgr/best.pt" --teacher "$RUN/teacher.npz" --epochs 60 --lr 1e-3 --output "$RUN/gain"
+ours1 evaluate-gain --checkpoint "$RUN/gain/best.pt" --split validation --condition C2_hole_10 --samples 32 --pairs 8 --compare-allocations --output "$RUN/validation_gain.json"
 ```
 
 先看验证集的 `paired_allocations`。每个 patch 在相同候选和 Flow 下对照均匀、密度、曲率和学习预算，同时记录初始化 CD、最终 CD、GT→输出距离和预算偏差。优先检查学习预算是否改善几何，并在正常和混合条件上复核覆盖。满足这个条件后进入联合阶段。
 
 ```bash
-ours1 train --stage joint --preset gdb_flow --checkpoint "$RUN/gain/last.pt" --fm-endpoint uniform --geom-weight 1 --cover-weight 1 --retain-weight 0 --batch-size 1 --epochs 30 --lr 1e-5 --output "$RUN/joint"
+ours1 train --stage joint --preset gdb_flow --checkpoint "$RUN/gain/best.pt" --fm-endpoint uniform --geom-weight 1 --cover-weight 1 --retain-weight 0 --batch-size 1 --epochs 30 --lr 1e-5 --output "$RUN/joint"
 ```
 
 这是 A 路线的起始配置，几何和覆盖分别对实际积分终点与原始 GT 计算两个方向的平方距离。用相同初始化再开一组 `--retain-weight 0.01`，另存输出，比较预算保持与几何质量。损失权重为实验起点。示例联合 batch 为 1，正式比较时统一或披露 batch、优化步数和耗时。A1 从同一 gain 权重用 `--preset gdb`，A2 从共同主干用 `--preset relation`。
 
 若 A 路线显示均匀终点抵消预算，可在单独实验切换 `--fm-endpoint adaptive`。B 路线只在训练时从当前 V3 基础样本的干净曲面候选池取点，应用同一归一化和旋转，按区域精确取满配额，再做 OT 配对。任一区域真实参考点不足时，该样本回到原 GT。每轮日志报告 B 路线实际使用和请求的样本数。两条路线都用原始 GT 计算几何与覆盖损失。
+
+## 验证集最佳权重
+
+`train` 的 baseline、rgr、joint 阶段，以及 `train-gain` 默认每 5 轮完整验证一次，最后一轮也执行验证。可用 `--val-every 1` 改成每轮验证，或用 `--val-every 0` 关闭。默认验证 100 个独立物体的全部 4 个 patch 和 7 个条件，共 2800 条记录。每次验证会增加一轮验证推理时间。
+
+选模指标为共同 canonical 坐标下的 CD-L1。先在物体内平均 patch，再平均物体，然后在 A/B/C/D/E 五类内平均条件，最后五类等权平均。严格改善时更新，分数相同保留较早权重。RGR 阶段用修正锚点的中点初始化和冻结主干评价，GainNet、联合阶段用当前完整网络输出评价。
+
+每个训练阶段输出以下文件。
+
+- `best.pt` 保存验证指标最好的模型、对应优化器和随机状态，供下一阶段初始化或固定选模后测试。
+- `last.pt` 保存最新训练状态，供同阶段 `--resume` 续训。
+- `best.json` 记录所选轮次、分数、条件和数据指纹。
+- `validation.jsonl` 保存每次验证的整体与分条件分数。
+
+验证使用 eval 模式，结束后恢复模块模式和 Python、NumPy、CPU/CUDA 随机状态。续训继承之前的最佳分数与模型，复制运行目录时同步保留 `last.pt` 和 `best.pt`。训练阶段结束后，最佳权重写入该阶段已完成的总轮数，正式评测可据此接受较早轮次。
+
+`--val-objects N` 可用少量物体做流程诊断。此类 `best.pt` 会记录非完整验证范围，正式评测要求完整验证选出的权重。
+
+如果训练已经按旧命令启动，可以让当前阶段完成，再对保留的候选权重补选。以下命令在 RGR 20 轮完成后执行。
+
+```bash
+ours1 select-best --checkpoint "$RUN/rgr/last.pt" --output "$RUN/rgr"
+```
+
+它评价该目录的 `epoch_*.pt` 和末轮权重，生成 `best.pt`。若已经有新版本生成的 `best.pt`，直接使用该权重。下一阶段的教师构建和 GainNet 训练须共同加载同一个 RGR best，缓存指纹会检查生成器权重。
 
 ## 诊断和正式评测
 
@@ -49,8 +74,8 @@ ours1 smoke --preset gdb_flow --smoke-object --output "$RUN/smoke.json"
 固定验证集选模规则后，使用已完成联合阶段的非调试权重。两个数据集各 80 个整物体、7 个条件，正式成绩来自独立评测入口。
 
 ```bash
-python -B run_subset_eval.py --phase check --models ours1 --ours1-checkpoint "$RUN/joint/last.pt" --root "$V3_DATA_ROOT"
-python -B run_subset_eval.py --phase run --models ours1 --ours1-checkpoint "$RUN/joint/last.pt" --root "$V3_DATA_ROOT"
+python -B run_subset_eval.py --phase check --models ours1 --ours1-checkpoint "$RUN/joint/best.pt" --root "$V3_DATA_ROOT"
+python -B run_subset_eval.py --phase run --models ours1 --ours1-checkpoint "$RUN/joint/best.pt" --root "$V3_DATA_ROOT"
 ```
 
 默认结果目录为 `server_runs/whole_object_eval80_ours1`。多个消融或终点实验使用各自的 `--output`。单模型 `ours1 predict` 另存每个样本的初始化、最终区域计数及预算偏差。旧版说明和 `adaptive_checks/` 记录的是复制时的旧实现。

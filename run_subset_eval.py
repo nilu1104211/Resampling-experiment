@@ -17,6 +17,7 @@ import gc
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -33,7 +34,7 @@ CHECKPOINTS = {
     "pufm": "server_runs/patch32/pufm_baseline_b8_w0_a8_fused/epoch_0030.pt",
     "pufmpp": "server_runs/patch32/pufmpp_s2_b8_w0_fused/last.pt",
     "ours": "server_runs/patch32/ours_rgr_mgb_b8_w0_a8_fused_seed21/full/last.pt",
-    "ours1": "server_runs/patch32/ours1_gdb_flow/joint/last.pt",
+    "ours1": "server_runs/patch32/ours1_gdb_flow/joint/best.pt",
     "spu": "server_runs/patch32/spu_shared256_b8_w0_cos60_seed21/last.pt",
 }
 SPU_INFERENCE = {"spu_profile": "shared-v3", "spu_groups": 64,
@@ -305,8 +306,23 @@ def check_checkpoint(saved, model):
     if model not in CHECKPOINTS:
         raise ValueError(f"Unknown model: {model}")
     epochs = saved.get("args", {}).get("epochs", 0) if model == "ours1" else (60 if model == "spu" else 30)
-    if not epochs or saved.get("protocol") != "V3" or saved.get("epoch") != epochs - 1:
+    selected_best = model == "ours1" and saved.get("checkpoint_role") == "validation_best"
+    if not epochs or saved.get("protocol") != "V3" or (not selected_best and saved.get("epoch") != epochs - 1):
         raise ValueError(f"{model} must be a completed V3 {epochs}-epoch stage endpoint")
+    if selected_best:
+        selected = saved.get("best_validation") or {}
+        protocol = selected.get("protocol", {})
+        if (saved.get("selection_completed_epochs") != epochs or
+                selected.get("epoch") != saved.get("epoch") or
+                not isinstance(saved.get("epoch"), int) or not 0 <= saved["epoch"] < epochs or
+                saved.get("validation") != selected or
+                not math.isfinite(selected.get("value", float("nan"))) or
+                selected.get("value", -1) < 0 or
+                protocol.get("split") != "validation" or not protocol.get("full_validation") or
+                protocol.get("metric") != "canonical_cd_l1_object_condition_family_mean" or
+                protocol.get("conditions") != CONDITIONS or
+                selected.get("samples") != protocol.get("expected_samples")):
+            raise ValueError("ours1 best.pt requires complete validation selection and a completed training stage")
     if model == "pufmpp":
         if saved.get("args", {}).get("stage") != "s2" or saved.get("result", {}).get("partial_debug_run", True):
             raise ValueError("PUFM++ requires a non-debug S2 checkpoint")
@@ -376,8 +392,17 @@ def preflight(plan):
             raise FileNotFoundError(f"Missing {model} checkpoint: {path}")
         saved = torch.load(path, map_location="cpu", weights_only=False)
         check_checkpoint(saved, model)
+        if saved.get("checkpoint_role") == "validation_best":
+            validation = saved["best_validation"]["protocol"]
+            if validation.get("data_manifest_sha256") != plan["metadata_sha256"]["base_manifest.json"]:
+                raise ValueError("Best checkpoint was selected on a different V3 validation dataset")
+            entries = read_json(Path(plan["data_root"]) / "metadata/base_manifest.json")["groups"]["validation"]
+            expected_samples = sum(int(entry["rows"]) for entry in entries) * len(CONDITIONS)
+            if (validation.get("object_ids") != sorted(entry["object_id"] for entry in entries) or
+                    validation.get("expected_samples") != expected_samples):
+                raise ValueError("Best checkpoint selection did not cover the complete validation population")
         require_training_profile(saved, profile, context="Subset evaluation")
-        epochs = saved["epoch"] + 1
+        epochs = saved.get("selection_completed_epochs", saved["epoch"] + 1)
         del saved
         gc.collect()
         plan["checkpoint_sha256"][model] = file_hash(path)
@@ -397,7 +422,7 @@ def preflight(plan):
         sources.append(spu_root / "cfgs/setting.yaml")
     if "ours1" in plan["models"]:
         folder = Path(plan["repo"]) / "our1/PUFM-main"
-        sources.extend(folder / name for name in ("adaptive_v3.py", "adaptive_endpoint.py", "gain_teacher.py"))
+        sources.extend(folder / name for name in ("adaptive_v3.py", "adaptive_endpoint.py", "gain_teacher.py", "validation_selection.py"))
         sources.extend((folder / "models").rglob("*.py"))
     plan["source_sha256"] = signature({str(path): file_hash(path) for path in sorted(set(sources))})
     plan["raw_root"] = os.environ.get("V3_RAW_ROOT") if plan["p2f"] else None

@@ -25,6 +25,7 @@ from gain_teacher import paired_labels, write_cache, generator_signature, stable
 from adaptive_endpoint import EndpointTrainingDataset, adaptive_endpoint
 from models.adaptive_ops import distance_vectors
 from models.budget_allocator import allocate
+from validation_selection import ValidationSelection, atomic_save
 
 
 def preset(name):
@@ -107,7 +108,7 @@ def create_model(args):
             model.flow.load_state_dict(state, strict=True)
     if args.resume and (asdict(config) != asdict(AdaptiveConfig(**saved["configuration"])) or saved.get("stage") != args.stage):
         raise ValueError("Resume must preserve model configuration and stage; use --checkpoint for a new stage")
-    if args.command in {"predict", "build-teacher", "evaluate-gain"}:
+    if args.command in {"predict", "build-teacher", "evaluate-gain", "select-best"}:
         if not saved and not args.allow_debug:
             raise ValueError("This command requires trained --checkpoint weights")
         if saved and saved.get("partial_debug_run") and not args.allow_debug:
@@ -122,13 +123,32 @@ def tensor_batch(batch, device):
         key: value.to(device) for key, value in batch.get("supervision", {}).items()}
 
 
-def save_checkpoint(path, model, optimizer, epoch, args, stages, debug=False):
-    torch.save({"protocol": "V3", "network_version": "ours1-rgdb-relflow-v1", "configuration": asdict(model.config), "model": model.state_dict(),
+def save_checkpoint(path, model, optimizer, epoch, args, stages, debug=False, selection=None):
+    payload = {"protocol": "V3", "network_version": "ours1-rgdb-relflow-v1", "configuration": asdict(model.config), "model": model.state_dict(),
                 "training_profile": args.training_profile,
                 "optimizer": optimizer.state_dict(), "epoch": epoch, "stage": args.stage,
                 "trained_stages": stages, "args": vars(args), "partial_debug_run": debug,
                 "rng": {"torch": torch.get_rng_state(), "numpy": np.random.get_state(), "python": random.getstate(),
-                        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}}, path)
+                        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}}
+    if selection is not None:
+        payload["best_validation"] = selection.best
+        payload["validation"] = selection.latest if selection.latest and selection.latest["epoch"] == epoch else None
+    payload["checkpoint_role"] = "validation_best" if Path(path).name == "best.pt" else "training"
+    atomic_save(payload, path)
+
+
+def validate_checkpoint(model, optimizer, epoch, args, stages, debug, selection, force=False):
+    improved = False
+    if selection.due(epoch) or force:
+        try:
+            improved = selection.evaluate(model, epoch)
+        except Exception:
+            # Preserve the completed epoch if validation is interrupted or fails.
+            save_checkpoint(Path(args.output) / "last.pt", model, optimizer, epoch, args, stages, debug, selection)
+            raise
+    save_checkpoint(Path(args.output) / "last.pt", model, optimizer, epoch, args, stages, debug, selection)
+    if improved:
+        save_checkpoint(Path(args.output) / "best.pt", model, optimizer, epoch, args, stages, debug, selection)
 
 
 def train(model, saved, args):
@@ -173,6 +193,8 @@ def train(model, saved, args):
         load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer,
                              disable_fused=getattr(args, "no_fused_optimizer", False))
         start = saved["epoch"] + 1
+        if args.epochs < start:
+            raise ValueError("Resume epochs cannot be less than the completed training epochs")
         torch.set_rng_state(saved["rng"]["torch"].cpu())
         np.random.set_state(saved["rng"]["numpy"])
         random.setstate(saved["rng"]["python"])
@@ -182,6 +204,8 @@ def train(model, saved, args):
         stages.append(args.stage)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
+    selection = ValidationSelection(args, saved if args.resume else None)
+    debug = bool(args.max_batches or args.allow_debug or saved and saved.get("partial_debug_run"))
     for epoch in range(start, args.epochs):
         sampler.set_epoch(epoch)
         model.train()
@@ -243,13 +267,15 @@ def train(model, saved, args):
         report = {"epoch": epoch, "stage": args.stage, "loss": float(np.mean(values)), "batches": len(values),
                   "adaptive_endpoints_used": adaptive_used, "adaptive_endpoints_requested": adaptive_requested,
                   "partial_debug_run": bool(args.max_batches)}
-        debug = bool(args.max_batches or args.allow_debug or saved and saved.get("partial_debug_run"))
-        save_checkpoint(out / "last.pt", model, optimizer, epoch, args, stages, debug=debug)
+        validate_checkpoint(model, optimizer, epoch, args, stages, debug, selection)
         if (epoch + 1) % args.save_every == 0:
-            save_checkpoint(out / f"epoch_{epoch + 1:04d}.pt", model, optimizer, epoch, args, stages, debug=debug)
+            save_checkpoint(out / f"epoch_{epoch + 1:04d}.pt", model, optimizer, epoch, args, stages, debug, selection)
         with (out / "train.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(report) + "\n")
         print(json.dumps(report), flush=True)
+    if args.resume and start >= args.epochs and args.val_every:
+        validate_checkpoint(model, optimizer, start - 1, args, stages, debug, selection, force=True)
+    selection.complete()
     ds.close()
 
 
@@ -304,9 +330,13 @@ def train_gain(model, saved, args):
         load_optimizer_state(optimizer, saved["optimizer"], fused=args.fused_optimizer,
                              disable_fused=getattr(args, "no_fused_optimizer", False))
         start = saved["epoch"] + 1
+        if args.epochs < start:
+            raise ValueError("Resume epochs cannot be less than the completed training epochs")
         torch.set_rng_state(saved["rng"]["torch"].cpu())
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
+    selection = ValidationSelection(args, saved if args.resume else None)
+    debug = bool(args.allow_debug or args.max_batches or saved and saved.get("partial_debug_run"))
     for epoch in range(start, args.epochs):
         losses = []
         for step, items in enumerate(loader):
@@ -328,15 +358,49 @@ def train_gain(model, saved, args):
         if "gain" not in stages:
             stages.append("gain")
         args.stage = "gain"
-        save_checkpoint(out / "last.pt", model, optimizer, epoch, args, stages,
-                        debug=bool(args.allow_debug or args.max_batches or saved and saved.get("partial_debug_run")))
+        validate_checkpoint(model, optimizer, epoch, args, stages, debug, selection)
         if (epoch + 1) % args.save_every == 0:
-            save_checkpoint(out / f"epoch_{epoch + 1:04d}.pt", model, optimizer, epoch, args, stages,
-                            debug=bool(args.allow_debug or args.max_batches or saved and saved.get("partial_debug_run")))
+            save_checkpoint(out / f"epoch_{epoch + 1:04d}.pt", model, optimizer, epoch, args, stages, debug, selection)
         with (out / "gain.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"epoch": epoch, "loss": float(np.mean(losses)), "teacher_rows": len(features)}) + "\n")
         print(json.dumps({"gain_epoch": epoch, "loss": float(np.mean(losses)), "teacher_rows": len(features)}), flush=True)
+    if args.resume and start >= args.epochs and args.val_every:
+        stages = list(saved.get("trained_stages", []))
+        validate_checkpoint(model, optimizer, start - 1, args, stages, debug, selection, force=True)
+    selection.complete()
     archive.close()
+
+
+def select_best(model, saved, args):
+    """Select from retained epochs of a completed ours1 stage."""
+    epochs = saved.get("args", {}).get("epochs")
+    if (saved.get("network_version") != "ours1-rgdb-relflow-v1" or
+            epochs is None or saved["epoch"] != epochs - 1):
+        raise ValueError("select-best needs the completed ours1 stage's last.pt")
+    args.stage, args.epochs = saved["stage"], epochs
+    selection = ValidationSelection(args)
+    folder = Path(args.checkpoint).parent
+    candidates = {}
+    for path in sorted(folder.glob("epoch_*.pt")) + [Path(args.checkpoint)]:
+        candidate = checkpoint_read(path)
+        if (candidate.get("configuration") != saved["configuration"] or candidate.get("stage") != args.stage or
+                candidate.get("training_profile") != saved.get("training_profile") or
+                candidate.get("partial_debug_run") != saved.get("partial_debug_run") or
+                not 0 <= candidate.get("epoch", -1) < epochs):
+            raise ValueError(f"Incompatible checkpoint candidate: {path}")
+        candidates[candidate["epoch"]] = path
+    for epoch, path in sorted(candidates.items()):
+        candidate = checkpoint_read(path)
+        model.load_state_dict(candidate["model"], strict=True)
+        if selection.evaluate(model, epoch):
+            candidate.update(best_validation=selection.best, validation=selection.latest,
+                             checkpoint_role="validation_best")
+            candidate["args"].update(val_every=args.val_every, val_objects=args.val_objects)
+            atomic_save(candidate, Path(args.output) / "best.pt")
+    latest = dict(saved, best_validation=selection.best, validation=selection.latest, checkpoint_role="training")
+    latest["args"] = {**saved["args"], "val_every": args.val_every, "val_objects": args.val_objects}
+    atomic_save(latest, Path(args.output) / "last.pt")
+    selection.complete()
 
 
 @torch.no_grad()
@@ -498,7 +562,7 @@ def evaluate_gain(model, args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["train", "build-teacher", "train-gain", "predict", "smoke", "evaluate-gain"])
+    parser.add_argument("command", choices=["train", "build-teacher", "train-gain", "predict", "smoke", "evaluate-gain", "select-best"])
     parser.add_argument("--preset", choices=["baseline", "rgr", "rule", "static", "mgb", "rgr_static", "full", "full_condition", "gdb", "relation", "gdb_flow"])
     parser.add_argument("--backbone", choices=["pufm", "pufm_w_attn"])
     parser.add_argument("--stage", choices=["baseline", "rgr", "joint"], default="baseline")
@@ -534,6 +598,8 @@ def main():
     parser.add_argument("--coverage-fraction", type=float)
     parser.add_argument("--online-teacher-every", type=int, default=10)
     parser.add_argument("--save-every", type=int, default=5)
+    parser.add_argument("--val-every", type=int, help="Validate every N epochs and at the final epoch (default 5; 0 disables)")
+    parser.add_argument("--val-objects", type=int, help="Validation objects (default 0 means all; a subset is diagnostic only)")
     parser.add_argument("--max-batches", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--samples", type=int, default=128)
@@ -565,6 +631,14 @@ def main():
     configure_assignment_workers(args.assignment_workers)
     seed_all(args.seed)
     model, saved = create_model(args)
+    for key, default in (("val_every", 5), ("val_objects", 0)):
+        previous = saved.get("args", {}).get(key, default) if args.resume else default
+        if getattr(args, key) is None:
+            setattr(args, key, previous)
+        if getattr(args, key) < 0:
+            parser.error("Validation frequency and object count must be nonnegative")
+        if args.resume and saved.get("best_validation") and key == "val_objects" and getattr(args, key) != previous:
+            parser.error("Resume must preserve the validation population")
     joint_v1 = args.stage == "joint" and (model.config.relation or model.config.allocation == "gdb")
     for key, default in dict(geom_weight=float(joint_v1), cover_weight=float(joint_v1),
                              retain_weight=0., fm_endpoint="uniform").items():
@@ -580,6 +654,9 @@ def main():
         return
     if args.command == "train-gain":
         train_gain(model, saved, args)
+        return
+    if args.command == "select-best":
+        select_best(model, saved, args)
         return
     operation = {"build-teacher": build_teacher, "predict": predict, "smoke": smoke, "evaluate-gain": evaluate_gain}[args.command]
     result = operation(model, saved, args) if args.command == "predict" else operation(model, args)
