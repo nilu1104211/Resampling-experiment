@@ -152,6 +152,8 @@ def validate_checkpoint(model, optimizer, epoch, args, stages, debug, selection,
 
 
 def train(model, saved, args):
+    if args.resume and saved.get("args", {}).get("batch_size", args.batch_size) != args.batch_size:
+        raise ValueError("Resume must preserve batch size; start a new stage from its parent checkpoint to change it")
     if args.stage in {"rgr", "joint"} and not saved and not args.allow_debug:
         raise ValueError("Recovery/joint stages need --checkpoint; untrained prototypes require --allow-debug")
     if args.stage == "baseline" and (model.config.use_rgr or model.config.allocation != "midpoint" or model.config.condition):
@@ -578,10 +580,10 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=21)
     parser.add_argument("--epochs", type=int, default=60)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--gain-batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=0)
-    parser.add_argument("--assignment-workers", type=int, default=1,
+    parser.add_argument("--assignment-workers", type=int, default=8,
                         help="Parallel exact CPU matching within a batch; independent of --workers")
     optimizer_options = parser.add_mutually_exclusive_group()
     optimizer_options.add_argument("--fused-optimizer", action="store_true",

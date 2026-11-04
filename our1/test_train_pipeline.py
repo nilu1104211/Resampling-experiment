@@ -74,3 +74,21 @@ class PipelineTests(unittest.TestCase):
                 command = run.call_args.args[2]
                 self.assertIn("gdb_flow", command)
                 self.assertIn("--checkpoint", command)
+                self.assertEqual(pipeline.option(command, "--batch-size"), "8")
+                self.assertEqual(pipeline.option(command, "--assignment-workers"), "8")
+                self.assertIn("--fused-optimizer", command)
+
+    def test_existing_batch_one_is_not_silently_resumed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            parent = root / "parent.pt"
+            parent.write_bytes(b"parent")
+            (root / "joint").mkdir()
+            (root / "joint/last.pt").touch()
+            args = SimpleNamespace(output=root, root=root, data_hash="data", source_hash="source", training_profile={})
+            last = last_checkpoint("joint", 9, 30)
+            last["training_profile"] = {}
+            last["args"]["batch_size"] = 1
+            with patch.object(pipeline, "wait_for_workers"), patch.object(pipeline, "load", return_value=last):
+                with self.assertRaisesRegex(ValueError, "batch=1"):
+                    pipeline.train_stage(args, "joint", 30, parent)

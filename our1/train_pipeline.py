@@ -147,6 +147,8 @@ def train_stage(args, stage, epochs, parent):
     if last is not None:
         if last.get("training_profile") != args.training_profile:
             raise ValueError(f"{stage}: training data profile differs from the common checkpoint")
+        if stage in {"rgr", "joint"} and last.get("args", {}).get("batch_size", 8) != 8:
+            raise ValueError(f"{stage}: checkpoint used batch={last['args']['batch_size']}; this pipeline uses batch=8. Start this stage in a new output from its parent best.pt.")
         # A stage can only continue the parent chosen for this run.
         previous_parent = last.get("args", {}).get("checkpoint")
         if previous_parent and (REPO / previous_parent).resolve() != parent.resolve():
@@ -169,17 +171,18 @@ def train_stage(args, stage, epochs, parent):
         return best_path
     initial = ["--resume", str(last_path)] if action == "resume" else ["--checkpoint", str(parent)]
     validation = ["--val-every", "5", "--val-objects", "0"]
+    assignment_workers = last.get("args", {}).get("assignment_workers", 8) if last else 8
+    common += ["--assignment-workers", str(assignment_workers)]
     if stage == "gain":
         training = ["train-gain", "--teacher", str(args.output / "teacher.npz"), "--lr", "1e-3"]
     else:
-        batch = last.get("args", {}).get("batch_size", 8 if stage == "rgr" else 1) if last else (8 if stage == "rgr" else 1)
         training = ["train", "--stage", stage, "--preset", "gdb" if stage == "rgr" else "gdb_flow",
-                    "--batch-size", str(batch), "--workers", "0",
+                    "--batch-size", "8", "--workers", "0",
                     "--training-mode", "mixed", "--train-patches-per-object", "32",
                     "--lr", "1e-4" if stage == "rgr" else "1e-5"]
         if stage == "joint" and action == "start":
             training += ["--fm-endpoint", "uniform", "--geom-weight", "1", "--cover-weight", "1", "--retain-weight", "0"]
-    if last and last.get("args", {}).get("fused_optimizer"):
+    if last is None or last.get("args", {}).get("fused_optimizer"):
         training.append("--fused-optimizer")
     del last, best
     run_command(args, stage, command + training + initial + validation + ["--epochs", str(epochs), *common])

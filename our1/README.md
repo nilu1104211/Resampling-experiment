@@ -45,19 +45,21 @@ export V3_DATA_ROOT="$V3_CODE_ROOT/adaptive_resampling_data_v3"
 COMMON=server_runs/patch32/pufm_common_b8_w0_a8_fused/epoch_0060.pt
 RUN=server_runs/patch32/ours1_gdb_flow
 
-ours1 train --stage rgr --preset gdb --checkpoint "$COMMON" --batch-size 8 --epochs 20 --output "$RUN/rgr"
+ours1 train --stage rgr --preset gdb --checkpoint "$COMMON" --batch-size 8 --workers 0 --assignment-workers 8 --fused-optimizer --epochs 20 --output "$RUN/rgr"
 ours1 build-teacher --checkpoint "$RUN/rgr/best.pt" --samples 128 --pairs 4 --teacher-epochs 0 1 2 3 4 --output "$RUN/teacher.npz"
-ours1 train-gain --checkpoint "$RUN/rgr/best.pt" --teacher "$RUN/teacher.npz" --epochs 60 --lr 1e-3 --output "$RUN/gain"
+ours1 train-gain --checkpoint "$RUN/rgr/best.pt" --teacher "$RUN/teacher.npz" --fused-optimizer --epochs 60 --lr 1e-3 --output "$RUN/gain"
 ours1 evaluate-gain --checkpoint "$RUN/gain/best.pt" --split validation --condition C2_hole_10 --samples 32 --pairs 8 --compare-allocations --output "$RUN/validation_gain.json"
 ```
 
 先看验证集的 `paired_allocations`。每个 patch 在相同候选和 Flow 下对照均匀、密度、曲率和学习预算，同时记录初始化 CD、最终 CD、GT→输出距离和预算偏差。优先检查学习预算是否改善几何，并在正常和混合条件上复核覆盖。满足这个条件后进入联合阶段。
 
 ```bash
-ours1 train --stage joint --preset gdb_flow --checkpoint "$RUN/gain/best.pt" --fm-endpoint uniform --geom-weight 1 --cover-weight 1 --retain-weight 0 --batch-size 1 --epochs 30 --lr 1e-5 --output "$RUN/joint"
+ours1 train --stage joint --preset gdb_flow --checkpoint "$RUN/gain/best.pt" --fm-endpoint uniform --geom-weight 1 --cover-weight 1 --retain-weight 0 --batch-size 8 --workers 0 --assignment-workers 8 --fused-optimizer --epochs 30 --lr 1e-5 --output "$RUN/joint"
 ```
 
-这是 A 路线的起始配置，几何和覆盖分别对实际积分终点与原始 GT 计算两个方向的平方距离。用相同初始化再开一组 `--retain-weight 0.01`，另存输出，比较预算保持与几何质量。损失权重为实验起点。示例联合 batch 为 1，正式比较时统一或披露 batch、优化步数和耗时。A1 从同一 gain 权重用 `--preset gdb`，A2 从共同主干用 `--preset relation`。
+这是 A 路线的起始配置，几何和覆盖分别对实际积分终点与原始 GT 计算两个方向的平方距离。用相同初始化再开一组 `--retain-weight 0.01`，另存输出，比较预算保持与几何质量。损失权重为实验起点。RGR 和联合训练沿用旧配置的 batch=8，每轮 3188 次参数更新。GainNet 缓存训练继续使用独立的 `--gain-batch-size 32`。A1 从同一 gain 权重用 `--preset gdb`，A2 从共同主干用 `--preset relation`。
+
+如果已有 batch=1 的联合训练检查点，自动脚本会提示配置不匹配。统一 batch=8 的实验应从 GainNet 的 best 权重启动新的联合训练目录。已有 RGR、教师和 GainNet 结果可以继续复用。
 
 若 A 路线显示均匀终点抵消预算，可在单独实验切换 `--fm-endpoint adaptive`。B 路线只在训练时从当前 V3 基础样本的干净曲面候选池取点，应用同一归一化和旋转，按区域精确取满配额，再做 OT 配对。任一区域真实参考点不足时，该样本回到原 GT。每轮日志报告 B 路线实际使用和请求的样本数。两条路线都用原始 GT 计算几何与覆盖损失。
 
