@@ -23,7 +23,7 @@
 - 原始代码提交：`5f5536ccbd9e31c919a8239c18378fa663e8f95c`。文件级来源在 `source_manifest.json`，含用户提供的六个参考代码快照哈希；参考目录没有 Git 元数据，未虚构来源 commit。
 - 唯一初始化权重：`pufm_baseline_b8_w0_a8_fused/epoch_0030.pt`，SHA256 为 `c602029630079252fcd249078877ebaae1be083c99e829a82c8e15aafd01887e`；每份配置均固定此哈希。
 - 保留原 attention PUFM、midpoint 初始化和 **5 次 Euler 速度评估**。M7 每次乘真实 `Δt`，五段之和为 1。
-- 训练：V3 mixed、每物体 32 patch、256→1024、默认 batch=8；M1–M4 默认额外训练 10 轮、Adam、lr=1e-5。10 轮是待验证的起始预算，修改预算时必须匹配控制组。
+- 训练：V3 mixed、每物体 32 patch、256→1024、默认 batch=8；M1–M4 默认额外训练 20 轮、Adam、lr=1e-5。20 轮是待验证的起始预算，修改预算时必须匹配控制组。
 - M1–M4 各自提供 `b_extra`：同一基线继续原 FM 训练。M3/M4 另提供 `mlp_control` 容量对照。所有副本支持 `b0` 关闭候选模块。
 - M5/M6 只训练新增模块，冻结 PUFM 参数和 BatchNorm 缓冲。M5 使用训练集配对干净输入；M6 使用冻结 PUFM 在训练对象上的预测及 GT 距离监督。推理接口均只接受观测坐标。
 - 每 5 轮及末轮在完整验证集上选 best，先按物体聚合，再对七条件等权 CD-L1 选最小值。`fscore_floor` 可设验证 F-score 门槛，默认 0 表示不额外约束。best 是验证候选中最优，不是逐轮全搜。
@@ -61,34 +61,80 @@ python -B module_screening/check_whole.py \
   --output outputs/module_screening_checks/whole_shape_01
 ```
 
+## 一键顺序运行
+
+新增 `train_all.py`，单个子进程完成后才开始下一项，默认顺序：
+
+`B-extra → M1a → M1b → M2a → M3a → M4a → M5a → M6a → M7校准 → M7均匀验证 → M7 ATS验证`。
+
+训练默认 20 轮、batch=8、workers=0、assignment_workers=8；保留各模块原配置的学习率。B-extra 是 M1–M4 共享的等预算 FM 续训对照，仍从同一原 PUFM 权重开始。M7 不训练新网络。M1–M6 在各自训练内定期完整验证，队列不启动冻结测试。
+
+完成本页“服务器准备”后，在服务器仓库根目录运行：
+
+```bash
+mkdir -p server_runs/patch32/module_screening
+nohup python -u -B module_screening/train_all.py --epochs 20 --fused-optimizer \
+  --output server_runs/patch32/module_screening/sequential_v1 \
+  > server_runs/patch32/module_screening/sequential_v1.console.log 2>&1 &
+echo "queue PID=$!"
+tail -f server_runs/patch32/module_screening/sequential_v1.console.log
+```
+
+权重及验证产物在 `sequential_v1/runs/<任务名>/`，各次子任务日志在 `sequential_v1/logs/`，冻结配置在 `configs/`，总进度在 `queue.json`。任何任务失败均立即停止。确认原队列已退出后，用原选项增加 `--resume` 接续：
+
+```bash
+nohup python -u -B module_screening/train_all.py --epochs 20 --fused-optimizer --resume \
+  --output server_runs/patch32/module_screening/sequential_v1 \
+  >> server_runs/patch32/module_screening/sequential_v1.console.log 2>&1 &
+```
+
+恢复前核对原源码、数据、初始化权重和配置身份；已完成任务验证产物后跳过，未完成训练使用本阶段 `last.pt` 续训。若某阶段尚未保存 `last.pt` 就失败，保留其目录并检查错误，程序不自动删除或覆盖。完整性不足的校准/验证输出也会停下来供检查。队列锁防止重复启动同一输出目录。
+
+其他用法：
+
+```bash
+# 仅打印计划，不加载权重、不创建文件。
+python -B module_screening/train_all.py --dry-run --fused-optimizer
+
+# 可选加入 M3/M4 容量对照；请使用新的输出目录。
+python -B module_screening/train_all.py --fused-optimizer --with-capacity-controls \
+  --output server_runs/patch32/module_screening/sequential_with_controls_v1
+
+# 只运行指定任务；ATS 验证会自动加入其训练集校准任务。
+python -B module_screening/train_all.py --tasks m1a m2a \
+  --output server_runs/patch32/module_screening/endpoint_pair_v1
+
+python -B -m unittest discover -s tests -p test_module_screening_queue.py -v
+```
+
 ## 独立训练与控制组
 
 以下是运行示例，本轮没有执行正式训练。输出目录必须是新目录，程序拒绝覆盖已有运行。
 
 ```bash
 # M1a 与 B-extra：相同额外预算，分别从固定原始 PUFM 开始。
-python -B module_screening/run.py m1 train --variant b_extra --epochs 10 --fused-optimizer \
-  --output server_runs/patch32/module_screening/m1/b_extra_10
-python -B module_screening/run.py m1 train --variant m1a --epochs 10 --fused-optimizer \
-  --output server_runs/patch32/module_screening/m1/m1a_10
-python -B module_screening/run.py m1 train --variant m1b --epochs 10 --fused-optimizer \
-  --output server_runs/patch32/module_screening/m1/m1b_10
+python -B module_screening/run.py m1 train --variant b_extra --epochs 20 --fused-optimizer \
+  --output server_runs/patch32/module_screening/m1/b_extra_20
+python -B module_screening/run.py m1 train --variant m1a --epochs 20 --fused-optimizer \
+  --output server_runs/patch32/module_screening/m1/m1a_20
+python -B module_screening/run.py m1 train --variant m1b --epochs 20 --fused-optimizer \
+  --output server_runs/patch32/module_screening/m1/m1b_20
 
 # M2a 与 M1a 只差终点损失。APML 保留上游 sum reduction，损失数值尺度不同。
-python -B module_screening/run.py m2 train --epochs 10 --fused-optimizer \
-  --output server_runs/patch32/module_screening/m2/m2a_10
+python -B module_screening/run.py m2 train --epochs 20 --fused-optimizer \
+  --output server_runs/patch32/module_screening/m2/m2a_20
 
 # M3/M4 使用原 FM 损失；控制组各自独立输出。
-python -B module_screening/run.py m3 train --output server_runs/patch32/module_screening/m3/m3a_10
-python -B module_screening/run.py m3 train --variant b_extra --output server_runs/patch32/module_screening/m3/b_extra_10
-python -B module_screening/run.py m3 train --variant mlp_control --output server_runs/patch32/module_screening/m3/mlp_control_10
-python -B module_screening/run.py m4 train --output server_runs/patch32/module_screening/m4/m4a_10
-python -B module_screening/run.py m4 train --variant b_extra --output server_runs/patch32/module_screening/m4/b_extra_10
-python -B module_screening/run.py m4 train --variant mlp_control --output server_runs/patch32/module_screening/m4/mlp_control_10
+python -B module_screening/run.py m3 train --output server_runs/patch32/module_screening/m3/m3a_20
+python -B module_screening/run.py m3 train --variant b_extra --output server_runs/patch32/module_screening/m3/b_extra_20
+python -B module_screening/run.py m3 train --variant mlp_control --output server_runs/patch32/module_screening/m3/mlp_control_20
+python -B module_screening/run.py m4 train --output server_runs/patch32/module_screening/m4/m4a_20
+python -B module_screening/run.py m4 train --variant b_extra --output server_runs/patch32/module_screening/m4/b_extra_20
+python -B module_screening/run.py m4 train --variant mlp_control --output server_runs/patch32/module_screening/m4/mlp_control_20
 
-# M5/M6 独立训练辅助网络，默认 lr=1e-4、10 轮；预算仍需验证选择。
-python -B module_screening/run.py m5 train --output server_runs/patch32/module_screening/m5/m5a_10
-python -B module_screening/run.py m6 train --output server_runs/patch32/module_screening/m6/m6a_10
+# M5/M6 独立训练辅助网络，默认 lr=1e-4、20 轮；预算仍需验证选择。
+python -B module_screening/run.py m5 train --output server_runs/patch32/module_screening/m5/m5a_20
+python -B module_screening/run.py m6 train --output server_runs/patch32/module_screening/m6/m6a_20
 ```
 
 若先做单 batch 生命周期排错，加 `--epochs 1 --batch-size 1 --limit-batches 1 --limit-samples 1` 并另选 debug 输出目录。该权重带 `partial_debug_run=true`，不能当正式权重使用。
@@ -98,9 +144,9 @@ python -B module_screening/run.py m6 train --output server_runs/patch32/module_s
 ```bash
 # 续训严格保持原配置、初始化权重、数据及源码身份；不扩展原定总轮数。
 python -B module_screening/run.py m1 train \
-  --config server_runs/patch32/module_screening/m1/m1a_10/config.json \
-  --resume server_runs/patch32/module_screening/m1/m1a_10/last.pt \
-  --output server_runs/patch32/module_screening/m1/m1a_10
+  --config server_runs/patch32/module_screening/m1/m1a_20/config.json \
+  --resume server_runs/patch32/module_screening/m1/m1a_20/last.pt \
+  --output server_runs/patch32/module_screening/m1/m1a_20
 ```
 
 ## M7 只校准时间表
@@ -123,20 +169,20 @@ python -B module_screening/run.py m7 validate --variant m7a \
 ```bash
 # 读取训练时保存的配置，避免评测时隐式改变轮数/超参数身份。
 python -B module_screening/run.py m1 validate \
-  --config server_runs/patch32/module_screening/m1/m1a_10/config.json \
-  --checkpoint server_runs/patch32/module_screening/m1/m1a_10/best.pt \
-  --output server_runs/patch32/module_screening/m1/m1a_10_validation
+  --config server_runs/patch32/module_screening/m1/m1a_20/config.json \
+  --checkpoint server_runs/patch32/module_screening/m1/m1a_20/best.pt \
+  --output server_runs/patch32/module_screening/m1/m1a_20_validation
 
 # 仅在验证筛选完毕后执行。每个 split 独立保存，均是固定 80 物体×7条件。
 python -B module_screening/run.py m1 predict --split pu1k_object \
-  --config server_runs/patch32/module_screening/m1/m1a_10/config.json \
-  --checkpoint server_runs/patch32/module_screening/m1/m1a_10/best.pt \
-  --output server_runs/patch32/module_screening/m1/m1a_10_pu1k80
+  --config server_runs/patch32/module_screening/m1/m1a_20/config.json \
+  --checkpoint server_runs/patch32/module_screening/m1/m1a_20/best.pt \
+  --output server_runs/patch32/module_screening/m1/m1a_20_pu1k80
 python -B module_screening/run.py m1 predict --split modelnet40_object \
-  --config server_runs/patch32/module_screening/m1/m1a_10/config.json \
-  --checkpoint server_runs/patch32/module_screening/m1/m1a_10/best.pt \
+  --config server_runs/patch32/module_screening/m1/m1a_20/config.json \
+  --checkpoint server_runs/patch32/module_screening/m1/m1a_20/best.pt \
   --whole-data-root /home/zk/baseline_compare/modelnet40_object80_seed21 \
-  --output server_runs/patch32/module_screening/m1/m1a_10_modelnet80
+  --output server_runs/patch32/module_screening/m1/m1a_20_modelnet80
 ```
 
 M2–M6 替换实验 ID、对应 config 和 checkpoint 即可；M7 提供 `--schedule` 而非新 checkpoint。M6 可在同一训练配置和同一 checkpoint 上用 `--refine-iterations 1` / `--refine-iterations 3` 分别做 M6a/M6b 推理消融，输出必须分目录，实际步数写入 summary 和逐样本诊断。

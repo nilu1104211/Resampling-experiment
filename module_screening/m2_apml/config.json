@@ -14,7 +14,7 @@
   "output_points": 1024,
   "train_patches_per_object": 32,
   "training_mode": "mixed",
-  "epochs": 10,
+  "epochs": 20,
   "batch_size": 8,
   "lr": 1e-05,
   "workers": 0,

@@ -12,7 +12,9 @@
 | M1 训练生命周期 | `outputs/module_screening_checks/lifecycle_m1_v2/`：1 epoch、1 batch、batch=1，验证每条件仅 1 条；成功保存 config/manifest、best/last、验证 CSV 和日志。权重带 debug 标记。 |
 | M7 校准生命周期 | `outputs/module_screening_checks/ats_lifecycle_v1/schedule.json`：仅一个训练 patch、51 个时间点，完成误差曲线→CDF→六时间点保存。时间表带 debug 标记，绑定基线/数据/源码。 |
 | 权重/时间表拦截、读取与续训入口 | `outputs/module_screening_checks/lifecycle_audit.json`：debug 权重和时间表在普通验证中被拒绝，显式 allow-debug 后验证通过；M1 已完成阶段的 resume 入口通过。 |
+| 一键顺序队列 | 新增 `train_all.py`，通过 `tests/test_module_screening_queue.py` 的 7 项执行顺序、失败停止、恢复跳过、锁及子进程日志检查。与原有 11 项合计 18 项全部通过，默认 20 轮、batch=8 已纳入断言。 |
+| 顺序队列实跑 | `outputs/module_screening_checks/queue_debug_v1/queue.json`：显式 1 epoch、1 batch、batch=1、每条件仅 1 条验证，依次完成 M1a→M7校准→均匀验证→ATS验证四个阶段，保存独立产物与日志。仅用于验证队列调用链。 |
 
-全量验证、正式 10 轮训练、完整 256 patch ATS 校准和最终冻结 80 物体测试均未执行。没有推送或提交 Git；已有历史文档改动保留。
+根据用户最新要求，七份配置和一键脚本的默认训练预算均改为 20 轮；M7 仍不训练新网络。全量验证、正式 20 轮训练、完整 256 patch ATS 校准和最终冻结 80 物体测试均未执行。本次一键脚本及 20 轮配置更新尚未提交或推送 Git；已有历史文档改动保留。
 
 生命周期排错发现并修复：不同条件的公共评价器会输出不同的区域指标字段，CSV 现按字段并集写出；几何核心指标按七条件等权，区域指标记录实际参与条件数，不补零。

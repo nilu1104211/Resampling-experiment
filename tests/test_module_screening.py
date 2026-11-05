@@ -67,6 +67,7 @@ class IsolationTests(unittest.TestCase):
         self.assertEqual(len({c['baseline_sha256'] for c in configs}), 1)
         self.assertEqual(len({c['experiment'] for c in configs}), 7)
         for config in configs:
+            self.assertEqual(config['epochs'], 20)
             self.assertEqual(config['flow_steps'], 5)
             self.assertEqual(config['train_patches_per_object'], 32)
             self.assertEqual(config['batch_size'], 8)
