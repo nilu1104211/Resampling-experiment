@@ -39,6 +39,15 @@ CHECKPOINTS = {
 }
 SPU_INFERENCE = {"spu_profile": "shared-v3", "spu_groups": 64,
                  "spu_transport": "source", "spu_passes": 8}
+# c81477d added only an opt-in coordinates_only=False argument and early return
+# to corrupt_base. The default path used by frozen evaluation is unchanged.
+# Accept only this reviewed pair of complete source hashes; further changes to
+# either protocol file still require explicit verification.
+FROZEN_PROTOCOL_COMPATIBILITY = {
+    ("02135eeb32c35a8b8b5a560fac693d7e9e3713d81ee505deb83a7752973ce66c",
+     "4dc341286914fa342e402c4932259682155dd4d5200450547475a1bde048fbf4"):
+        "c81477d: coordinates_only=False preserves the frozen default protocol",
+}
 
 
 def read_json(path):
@@ -178,7 +187,6 @@ def supplement_path(root, relative):
 def validate_supplement(plan):
     if plan["split"] != "modelnet40_object":
         return
-    import ast
     root = Path(plan["whole_data_root"])
     path = root / "manifest.json"
     if not path.is_file():
@@ -192,8 +200,16 @@ def validate_supplement(plan):
         raise ValueError("Supplement belongs to different original V3 object splits")
     source = signature({name: (Path(plan["repo"]) / "adaptive_resampling" / name).read_text(encoding="utf-8").strip()
                         for name in ("core.py", "v3_core.py")})
-    if package.get("protocol_source_sha256") != source:
-        raise ValueError("Supplement's V3 sampling/corruption protocol differs from the repository")
+    frozen_source = package.get("protocol_source_sha256")
+    compatibility = "exact_source_match" if frozen_source == source else FROZEN_PROTOCOL_COMPATIBILITY.get((frozen_source, source))
+    if compatibility is None:
+        raise ValueError("Supplement's V3 sampling/corruption protocol differs from the repository "
+                         f"(package={frozen_source}, repository={source})")
+    plan["supplement_protocol"] = {"package_source_sha256": frozen_source,
+                                   "repository_source_sha256": source,
+                                   "compatibility": compatibility}
+    if frozen_source != source:
+        print(f"ModelNet40 frozen protocol compatibility verified: {compatibility}", flush=True)
     if any(condition not in package["conditions"] for condition in plan["conditions"]):
         raise ValueError("Requested conditions are not frozen in the whole-object supplement")
     records = {item["object_id"]: item for item in package["records"]}

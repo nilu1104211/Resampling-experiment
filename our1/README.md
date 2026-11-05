@@ -103,3 +103,5 @@ python -B run_subset_eval.py --phase run --models ours1 --ours1-checkpoint "$RUN
 ```
 
 默认结果目录为 `server_runs/whole_object_eval80_ours1`。多个消融或终点实验使用各自的 `--output`。单模型 `ours1 predict` 另存每个样本的初始化、最终区域计数及预算偏差。旧版说明和 `adaptive_checks/` 记录的是复制时的旧实现。
+
+冻结 ModelNet40 测试包生成于 OUNet 的 `coordinates_only=False` 可选预检查路径加入之前。评测入口兼容这两个已核对的完整协议源码指纹，仍逐个校验选中物体的数据 SHA256、原始划分和条件；兼容依据及新旧协议指纹写入评测 manifest 的 `supplement_protocol`。未核对的协议变化继续报错，不需要修改或重新生成冻结数据。
