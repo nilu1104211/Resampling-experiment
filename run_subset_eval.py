@@ -4,7 +4,9 @@
 Default: 80 PU1K whole objects + 80 ModelNet40 whole objects, 7 conditions,
 2 models = 2240 predictions, all 2048 -> 8192 points. Ours can be selected with
 --models ours, or paired with PUFM using --models pufm ours. SPU-IMR uses
---models spu and its completed shared-v3 60-epoch checkpoint. ModelNet40 uses a
+--models spu and its completed shared-v3 60-epoch checkpoint. OUNet uses
+--models ounet with its completed 60-epoch fixed-budget checkpoint (scale 0.25).
+ModelNet40 uses a
 frozen test-only supplement; original V3 data is unchanged. PUFM++ shares ONE existing
 schedule or one separately labelled 256-training-patch calibration.
 Only the standard library is needed for --phase plan.
@@ -36,9 +38,11 @@ CHECKPOINTS = {
     "ours": "server_runs/patch32/ours_rgr_mgb_b8_w0_a8_fused_seed21/full/last.pt",
     "ours1": "server_runs/patch32/ours1_gdb_flow/joint/best.pt",
     "spu": "server_runs/patch32/spu_shared256_b8_w0_cos60_seed21/last.pt",
+    "ounet": "server_runs/patch32/ounet_b8_poly60_scale025_seed21/last.pt",
 }
 SPU_INFERENCE = {"spu_profile": "shared-v3", "spu_groups": 64,
                  "spu_transport": "source", "spu_passes": 8}
+OUNET_INFERENCE = {"octree_depth": 8, "octree_scale": .25, "octree_beam": 4}
 # c81477d added only an opt-in coordinates_only=False argument and early return
 # to corrupt_base. The default path used by frozen evaluation is unchanged.
 # Accept only this reviewed pair of complete source hashes; further changes to
@@ -175,6 +179,8 @@ def make_plan(args):
         plan["supplement_manifest_sha256"] = file_hash(path) if path.is_file() else None
     if "spu" in args.models:
         plan["inference_runtime"]["spu"] = dict(SPU_INFERENCE)
+    if "ounet" in args.models:
+        plan["inference_runtime"]["ounet"] = dict(OUNET_INFERENCE)
     return plan
 
 
@@ -321,7 +327,7 @@ def print_suite(suite):
 def check_checkpoint(saved, model):
     if model not in CHECKPOINTS:
         raise ValueError(f"Unknown model: {model}")
-    epochs = saved.get("args", {}).get("epochs", 0) if model == "ours1" else (60 if model == "spu" else 30)
+    epochs = saved.get("args", {}).get("epochs", 0) if model == "ours1" else (60 if model in {"spu", "ounet"} else 30)
     selected_best = model == "ours1" and saved.get("checkpoint_role") == "validation_best"
     if not epochs or saved.get("protocol") != "V3" or (not selected_best and saved.get("epoch") != epochs - 1):
         raise ValueError(f"{model} must be a completed V3 {epochs}-epoch stage endpoint")
@@ -351,6 +357,20 @@ def check_checkpoint(saved, model):
                 raise ValueError(f"SPU checkpoint {key}={args.get(key)!r}; expected {expected!r}")
         if args.get("training_mode") != "mixed":
             raise ValueError("SPU main comparison requires the shared mixed training inputs")
+    elif model == "ounet":
+        args = saved.get("args", {})
+        if (args.get("model_name") != "ounet" or args.get("epochs") != 60 or
+                saved.get("result", {}).get("partial_debug_run", True) or args.get("max_batches", 0)):
+            raise ValueError("OUNet requires a completed non-debug 60-epoch training checkpoint")
+        for key, expected in {**OUNET_INFERENCE, "training_mode": "mixed",
+                              "ounet_schedule_epochs": 60, "ounet_poly_power": .9}.items():
+            if args.get(key) != expected:
+                raise ValueError(f"OUNet checkpoint {key}={args.get(key)!r}; expected {expected!r}")
+        scheduler = saved.get("scheduler") or {}
+        if any(scheduler.get(key) != expected for key, expected in {
+                "schedule_type": "ounet-poly-v1", "schedule_epochs": 60,
+                "power": .9, "last_epoch": 60}.items()):
+            raise ValueError("OUNet checkpoint requires the completed 60-epoch poly scheduler state")
     elif model == "ours1":
         config = saved.get("configuration", {})
         if saved.get("network_version") != "ours1-rgdb-relflow-v1" or saved.get("stage") != "joint" or saved.get("partial_debug_run", True):
@@ -436,6 +456,10 @@ def preflight(plan):
         spu_root = Path(plan["comparison_root"]) / "spu-imr-main"
         sources.extend(spu_root.rglob("*.py"))
         sources.append(spu_root / "cfgs/setting.yaml")
+    if "ounet" in plan["models"]:
+        from importlib.metadata import version
+        plan["environment"]["ocnn"] = version("ocnn")
+        sources.extend((Path(plan["comparison_root"]) / "upsample-clean-master").rglob("*.py"))
     if "ours1" in plan["models"]:
         folder = Path(plan["repo"]) / "our1/PUFM-main"
         sources.extend(folder / name for name in ("adaptive_v3.py", "adaptive_endpoint.py", "gain_teacher.py", "validation_selection.py"))
@@ -555,22 +579,26 @@ def load_network(plan, model):
             return network.integrate(network.prepare(points, count))
         return network, predict, None
     folder = Path(plan["comparison_root"])
-    if model == "spu":
+    if model in {"spu", "ounet"}:
+        adapter_folder, model_name, recipe = {
+            "spu": ("spu-imr-main", "spu-imr", SPU_INFERENCE),
+            "ounet": ("upsample-clean-master", "ounet", OUNET_INFERENCE),
+        }[model]
         sys.path.insert(0, str(folder))
-        sys.path.insert(0, str(folder / "spu-imr-main"))
+        sys.path.insert(0, str(folder / adapter_folder))
         common = import_file("v3_common", folder / "v3_common.py")
-        runtime = dict(plan.get("inference_runtime", {}).get("spu", SPU_INFERENCE))
-        if runtime != SPU_INFERENCE:
-            raise ValueError("SPU inference settings differ from the checked shared-v3 recipe")
-        args = SimpleNamespace(command="predict", model_name="spu-imr", device=plan["device"], **runtime)
+        runtime = dict(plan.get("inference_runtime", {}).get(model, recipe))
+        if runtime != recipe:
+            raise ValueError(f"{model} inference settings differ from the checked recipe")
+        args = SimpleNamespace(command="predict", model_name=model_name, device=plan["device"], **runtime)
         common.set_seed(plan["seed"])
-        network = common.load_adapter(folder / "spu-imr-main", args)
+        network = common.load_adapter(folder / adapter_folder, args)
         saved = common.load_weights(network, checkpoint, args)
         check_checkpoint(saved, model)
         del saved
         gc.collect()
         network.eval()
-        print(f"SPU-IMR inference configuration: {runtime}", flush=True)
+        print(f"{model} inference configuration: {runtime}", flush=True)
         return network, network.predict, common
     if model != "pufmpp":
         raise ValueError(f"Unknown model: {model}")
@@ -895,6 +923,8 @@ def main():
     parser.add_argument("--spu-checkpoint", type=Path, default=Path(CHECKPOINTS["spu"]),
                         help="Completed shared-v3/source SPU-IMR 60-epoch checkpoint")
     parser.add_argument("--ours1-checkpoint", type=Path, default=Path(CHECKPOINTS["ours1"]))
+    parser.add_argument("--ounet-checkpoint", type=Path, default=Path(CHECKPOINTS["ounet"]),
+                        help="Completed OUNet-V3 fixed-budget 60-epoch checkpoint, depth 8 / scale 0.25")
     parser.add_argument("--worker", choices=list(CHECKPOINTS), help=argparse.SUPPRESS)
     parser.add_argument("--job-manifest", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -906,8 +936,10 @@ def main():
     # Resolve repository-relative arguments consistently even when invoked elsewhere.
     args.repo = args.repo.resolve()
     if args.output is None:
-        args.output = Path("server_runs/whole_object_eval80_ours1" if "ours1" in args.models else "server_runs/whole_object_eval80_20261030")
-    for name in ("output", "pufm_checkpoint", "pufmpp_checkpoint", "ours_checkpoint", "ours1_checkpoint", "spu_checkpoint", "root", "schedule", "whole_data_root"):
+        args.output = Path("server_runs/whole_object_eval80_ours1" if "ours1" in args.models else
+                           "server_runs/whole_object_eval80_ounet" if "ounet" in args.models else
+                           "server_runs/whole_object_eval80_20261030")
+    for name in ("output", "pufm_checkpoint", "pufmpp_checkpoint", "ours_checkpoint", "ours1_checkpoint", "spu_checkpoint", "ounet_checkpoint", "root", "schedule", "whole_data_root"):
         path = getattr(args, name)
         if path is not None and not path.is_absolute():
             setattr(args, name, args.repo / path)
