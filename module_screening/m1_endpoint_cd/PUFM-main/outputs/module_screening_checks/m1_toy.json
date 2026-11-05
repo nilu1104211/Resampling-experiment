@@ -1,0 +1,22 @@
+{
+  "experiment": "M1",
+  "variant": "m1a",
+  "status": "passed",
+  "input": [
+    1,
+    256,
+    3
+  ],
+  "output": [
+    1,
+    1024,
+    3
+  ],
+  "finite": true,
+  "baseline_equivalence": true,
+  "loss": 0.004738739691674709,
+  "baseline_loaded": false,
+  "real_v3_patch": false,
+  "device": "cuda",
+  "torch": "2.7.1+cu118"
+}

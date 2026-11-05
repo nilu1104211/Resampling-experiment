@@ -1,0 +1,24 @@
+{
+  "experiment": "M3",
+  "variant": "m3a",
+  "status": "passed",
+  "input": [
+    1,
+    256,
+    3
+  ],
+  "output": [
+    1,
+    1024,
+    3
+  ],
+  "finite": true,
+  "baseline_equivalence": true,
+  "loss": 0.0026994883082807064,
+  "optimizer_step": true,
+  "frozen_flow_unchanged": false,
+  "baseline_loaded": true,
+  "real_v3_patch": true,
+  "device": "cuda",
+  "torch": "2.7.1+cu118"
+}

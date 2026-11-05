@@ -37,6 +37,9 @@ adaptive_runs/
 adaptive_predictions/
 adaptive_evaluation/
 
+# Local-only Python 3.13 QA dependency (server uses requirements_v3.txt)
+/tmp/module_screening_deps/
+
 # Desktop files
 .DS_Store
 Thumbs.db
