@@ -1,0 +1,15 @@
+# Only source/configuration/documentation belongs in these independent copies.
+__pycache__/
+*.py[cod]
+*.pt
+*.pth
+*.ckpt
+*.tmp
+*.log
+*.npy
+*.npz
+outputs/
+runs/
+logs/
+build/
+dist/

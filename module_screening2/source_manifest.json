@@ -1,0 +1,44 @@
+{
+  "schema": "pufm-module2-source-v1",
+  "local_archive_commits_unknown": true,
+  "baseline_files_sha256": {
+    "models/diffusion.py": "2dbeb73a8af388a083e946caf5fa235f6fd73dbae36f06840e64b208b15234be",
+    "models/pointnet2_util.py": "523ee80fedd87b232943d09adafa2e5c7fa2b91528074040fb077b76bf40a45c",
+    "models/utils.py": "8c99bb3b9192fdced550dbe5194987965d6f536967c5e223af718a13bb4f56c9"
+  },
+  "v3_compatible_sources_sha256": {
+    "module_screening/m3_gaussian_features/PUFM-main/models/diffusion.py": "b7b0649ecfec00e50102f0deb9060fb75fdd6a339baeffe70b3a255270e8c36f",
+    "module_screening/m3_gaussian_features/PUFM-main/models/pointnet2_util.py": "fbc9efab9d4da9c3174557869660321f45c1f4dee5c7fc515ba44d2943d7f795",
+    "module_screening/m3_gaussian_features/PUFM-main/models/utils.py": "b31937cc1144d8b71849f19ff2f02546ffc760bfc7d66272c016fbbc2f9fdaaf",
+    "module_screening/m3_gaussian_features/PUFM-main/models/adaptive_ops.py": "8a6f32582abfe11afca665de84d01d9fb7687a6ca999c540ce4a9d981a02042d"
+  },
+  "references": {
+    "Denoise-yourself-main": {
+      "util.py": "1deb9abf0bd18e47ddd5bb0a236c5d2620d24ef53dc30441b7e6fd2fcf9e6eff",
+      "data_handler.py": "4a8cd23f029ebdd1ed86ee1dbcf91aedd05a86c547048b21e01778ee634b8779",
+      "README.md": "007e156dfa6abd63698550cc792c25dfffb1cb635d6c5d952a1893716755d390"
+    },
+    "DWCNET-Robust-Point-Cloud-Completion-against-Corruptions-main": {
+      "models/DWCNMMCADM.py": "9037959d5602774fcfa66097c0c6de58b1762fb5b031ef13161798c1c42c0932",
+      "LICENSE": "4553f496d9b92c59ac6353a9424caf5d0a599fb549d81e3813da74bd255b2449"
+    },
+    "ICCV2025-UPP-main": {
+      "models/Point_MAE_pretask_dev.py": "58eb27387a1e17d4a267c1fbdf6990493fb5e482928b204868320ee334c2dca8",
+      "models/Point_MAE_unify.py": "e0dfdf54c92a89711b6d6f64a4cb052a77094202ff180de98786d3d2afd0d812",
+      "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    "PointSP-main": {
+      "PCT_Pytorch/sampling.py": "72b692e06ffbea0894d1342b6fe7f8a3b20fb5170d4012280750636bb70b0985",
+      "PCT_Pytorch/util.py": "3917bf0e4245532a5dde08628cfb7b1732dbfdcccbe1d98a7cf4086450624516",
+      "PCT_Pytorch/interpolation.py": "030b96f904e7b9bdea647b467129f8c64684a8601ed68acd3ea76f5aea435abd",
+      "PCT_Pytorch/pointnet2_ops_lib/pointnet2_ops/_ext-src/src/sampling_gpu.cu": "5365aa3070b379e262201cd40525bb7663ba026b69c931b0d055ceb0a5a88562",
+      "LICENSE": "9a999131731f05ea992f3d7e068009018f9456e1a6283f10c54a77036cb88b75",
+      "PCT_Pytorch/LICENSE": "f7bb945298b31ac698afbd61dfc051ccaf31b182ad04297334be69fd6b0788ec"
+    },
+    "SPOFormer-main": {
+      "models/SPOFormer.py": "934bd8fc599d15c4593c0a220149cecb36126ed7a9ddaf3732d121dd71ef4b59",
+      "tools/runner.py": "f95724a0a183b23884497aac34ead1404b6945f8909ab9d26cdd31c2d515891f",
+      "README.md": "f4bd906b40bdb858af3ffabc7d209a1c66b01a457022b5d1edac86a28fb87db7"
+    }
+  }
+}

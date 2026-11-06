@@ -1,0 +1,498 @@
+"""Independent PUFM screening: train / validate / predict / smoke."""
+from pathlib import Path
+import argparse
+import csv
+import hashlib
+import json
+import os
+import random
+import sys
+import time
+
+LOCAL = Path(__file__).resolve().parent
+REPO = LOCAL.parents[2]
+sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(LOCAL))
+os.environ['PUFM_POINTOPS'] = 'torch'
+os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as handle:
+        for block in iter(lambda: handle.read(4 * 1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def signature(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+
+def write_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + '\n', encoding='utf-8')
+    temporary.replace(path)
+
+
+def save_checkpoint(path, value):
+    import torch
+    temporary = path.with_name(path.name + '.tmp')
+    torch.save(value, temporary)
+    temporary.replace(path)
+
+
+def code_identity():
+    paths = list(LOCAL.rglob('*.py')) + list((REPO / 'adaptive_resampling').glob('*.py'))
+    paths += [REPO / 'run_subset_eval.py', REPO / 'module_screening2/protocol.py']
+    return {p.relative_to(REPO).as_posix(): file_hash(p) for p in sorted(paths)}
+
+
+def tensor_hash(tensor):
+    return hashlib.sha256(tensor.detach().cpu().contiguous().numpy().tobytes()).hexdigest()
+
+
+def model_hash(model):
+    return signature({k: tensor_hash(v) for k, v in sorted(model.state_dict().items())})
+
+
+def seed_all(value):
+    import numpy as np
+    import torch
+    random.seed(value)
+    np.random.seed(value)
+    torch.manual_seed(value)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(value)
+
+
+def configure_runtime(args):
+    import torch
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.use_deterministic_algorithms(True)
+    torch.set_num_threads(args.cpu_threads)
+    os.environ['V3_FPS_BACKEND'] = args.fps_backend or ('cuda' if args.device.startswith('cuda') else 'torch')
+
+
+def runtime_identity(args):
+    import platform
+    import torch
+    return {'python': platform.python_version(), 'torch': torch.__version__, 'cuda': torch.version.cuda,
+            'gpu': torch.cuda.get_device_name(args.device) if args.device.startswith('cuda') else None,
+            'device': args.device, 'fps_backend': os.environ['V3_FPS_BACKEND'],
+            'pointops': 'portable_torch', 'tf32': False, 'deterministic_algorithms': True,
+            'cpu_threads': args.cpu_threads}
+
+
+def read_checkpoint(path):
+    import torch
+    return torch.load(path, map_location='cpu', weights_only=False)
+
+
+def data_identity(root):
+    return {name: file_hash(Path(root) / 'metadata' / name) for name in
+            ('base_manifest.json', 'generation_config.json', 'dataset_splits.json')}
+
+
+def make_model(args, config, initialize=True):
+    from models.screening_model import ScreeningPUFM, load_baseline
+    model = ScreeningPUFM(config).to(args.device)
+    saved = None
+    if initialize and file_hash(args.baseline_checkpoint) != config['baseline_sha256']:
+        raise ValueError('All copies require the pinned original epoch_0030.pt SHA256')
+    if args.checkpoint or args.resume:
+        saved = read_checkpoint(args.resume or args.checkpoint)
+        if saved.get('schema') != 'pufm-module2-checkpoint-v1' or saved.get('config') != config:
+            raise ValueError('Checkpoint belongs to a different copy/configuration')
+        if not args.resume and (saved.get('partial_debug_run') or not saved.get('training_complete')) and not args.allow_debug:
+            raise ValueError('Incomplete/debug checkpoints require --allow-debug')
+        model.load_state_dict(saved['model'], strict=True)
+        if saved['identity']['baseline_sha256'] != file_hash(args.baseline_checkpoint):
+            raise ValueError('Candidate initialized from another baseline')
+        if saved['identity']['metadata_sha256'] != data_identity(args.root):
+            raise ValueError('Candidate data metadata changed')
+        if saved['identity']['code_sha256'] != code_identity():
+            raise ValueError('Candidate source changed since training')
+        if saved['identity']['runtime'] != runtime_identity(args):
+            raise ValueError('Runtime changed; use the exact recorded environment/backend')
+    elif initialize:
+        load_baseline(model, read_checkpoint(args.baseline_checkpoint))
+    return model, saved
+
+
+def training_dataset(args, config):
+    from adaptive_resampling.v3_dataset import AdaptiveResamplingDataset
+    return AdaptiveResamplingDataset(args.root, 'train', training_mode='mixed', include_supervision=True,
+        augment_rotation=True, train_patches_per_object=config['train_patches_per_object'])
+
+
+def batch_to(batch, device):
+    import torch
+    if isinstance(batch, dict):
+        return {k: batch_to(v, device) for k, v in batch.items()}
+    return batch.to(device).float() if isinstance(batch, torch.Tensor) else batch
+
+
+def aggregate(rows):
+    import numpy as np
+    keys = sorted({k for row in rows for k, v in row.items() if isinstance(v, (float, int)) and k != 'sample_index'})
+    grouped = {}
+    for row in rows:
+        grouped.setdefault((row['condition'], row['object_id']), []).append(row)
+    objects = [{'condition': c, 'object_id': o, **{k: float(np.mean([r[k] for r in group if k in r]))
+                for k in keys if any(k in r for r in group)}} for (c, o), group in sorted(grouped.items())]
+    conditions = {}
+    for condition in sorted({r['condition'] for r in objects}):
+        group = [r for r in objects if r['condition'] == condition]
+        conditions[condition] = {k: float(np.mean([r[k] for r in group if k in r]))
+                                 for k in keys if any(k in r for r in group)}
+    if len(conditions) != 7:
+        raise ValueError('Selection requires all seven conditions')
+    macro = {k: float(np.mean([r[k] for r in conditions.values() if k in r])) for k in keys}
+    return {'aggregation': 'patches/object, objects/condition, seven conditions equally weighted',
+            'samples': len(rows), 'objects': len({r['object_id'] for r in rows}),
+            'conditions': conditions, 'macro': macro,
+            'metric_condition_counts': {k: sum(k in r for r in conditions.values()) for k in keys}}, objects
+
+
+def evaluate(model, args, output, split='validation', save_predictions=False):
+    import numpy as np
+    import torch
+    from adaptive_resampling.v3_dataset import AdaptiveResamplingDataset, inverse_prediction
+    from adaptive_resampling.v3_metrics import evaluate_sample
+    from run_subset_eval import CONDITIONS
+    from types import SimpleNamespace
+    output = Path(output)
+    model.eval()
+    identity = {'model_sha256': model_hash(model), 'config': model.config, 'metadata_sha256': data_identity(args.root),
+                'code_sha256': code_identity(), 'runtime': runtime_identity(args), 'split': split,
+                'limit_samples': args.limit_samples, 'save_predictions': save_predictions}
+    marker = output / 'evaluation_identity.json'
+    if output.exists():
+        if not marker.is_file() or json.loads(marker.read_text(encoding='utf-8')) != identity:
+            raise FileExistsError(f'Evaluation output belongs to another model/configuration: {output}')
+        if (output / 'summary.json').is_file():
+            return json.loads((output / 'summary.json').read_text(encoding='utf-8'))
+    output.mkdir(parents=True, exist_ok=True)
+    write_json(marker, identity)
+    plan = None
+    if split != 'validation':
+        from run_subset_eval import make_plan, validate_supplement, evaluation_dataset, flatten
+        plan_args = SimpleNamespace(repo=REPO, root=args.root, output=output, split=split,
+            objects=80, patches_per_object=None, seed=21, conditions=CONDITIONS, models=['pufm'],
+            calibration_samples=256, fps_backend=os.environ['V3_FPS_BACKEND'], patch_batch_size=1,
+            schedule=None, p2f=False, device=args.device, pufm_checkpoint=args.baseline_checkpoint,
+            whole_data_root=args.whole_data_root)
+        plan = make_plan(plan_args)
+        validate_supplement(plan)
+    rows, diagnostics = [], []
+    warmed = False
+    for condition in CONDITIONS:
+        ds = (AdaptiveResamplingDataset(args.root, 'validation', condition=condition, include_supervision=True,
+              augment_rotation=False) if plan is None else evaluation_dataset(plan, condition, include_supervision=True))
+        indices = list(range(len(ds))) if plan is None else [i for i, _ in flatten(plan['selection'])]
+        if args.limit_samples:
+            indices = indices[:args.limit_samples]
+        predictions, ids = [], []
+        for index in indices:
+            sample = ds[index]
+            observed = torch.as_tensor(sample['input_xyz'], device=args.device).float().unsqueeze(0)
+            if observed.shape[1] != (256 if split == 'validation' else 2048):
+                raise ValueError('Input point budget changed')
+            # Evaluation has its own RNG scope and cannot shift training RNG states.
+            devices = [observed.device.index] if observed.is_cuda else []
+            with torch.random.fork_rng(devices=devices):
+                torch.manual_seed(int(signature([model.config['seed'], sample['sample_id']])[:8], 16))
+                with torch.no_grad():
+                    if not warmed:
+                        model(observed)
+                        warmed = True
+                    if observed.is_cuda:
+                        torch.cuda.synchronize()
+                    started = time.perf_counter()
+                    prediction, diag = model(observed, return_diagnostics=True)
+                    if observed.is_cuda:
+                        torch.cuda.synchronize()
+                    elapsed = time.perf_counter() - started
+            row = {'condition': condition, 'object_id': sample['object_id'], 'sample_id': sample['sample_id'],
+                   'sample_index': index, 'input_sha256': tensor_hash(observed), 'prediction_sha256': tensor_hash(prediction),
+                   **evaluate_sample(prediction[0], sample), 'prediction_seconds': elapsed}
+            rows.append(row)
+            ids.append(sample['sample_id'])
+            diagnostics.append({'sample_id': sample['sample_id'], **{k: v.detach().cpu().tolist()
+                                if hasattr(v, 'detach') else v for k, v in diag.items()}})
+            if save_predictions:
+                predictions.append(inverse_prediction(prediction[0], sample).astype('f4'))
+        if save_predictions:
+            np.savez_compressed(output / f'{condition}.npz', prediction=np.stack(predictions), sample_id=np.asarray(ids))
+        ds.close()
+    summary, objects = aggregate(rows)
+    summary.update(**identity, partial_debug_run=bool(args.limit_samples), baseline_sha256=file_hash(args.baseline_checkpoint),
+                   checkpoint_sha256=file_hash(args.checkpoint or args.resume) if args.checkpoint or args.resume else None,
+                   input_selection_sha256=signature([[r['condition'], r['sample_id'], r['input_sha256']] for r in rows]),
+                   parameter_count=sum(p.numel() for p in model.parameters()),
+                   extra_parameter_count=sum(p.numel() for p in model.candidate.parameters()) if model.candidate is not None else 0,
+                   timing_scope='prediction including adapter; first sample warmup excluded; loading/metrics excluded')
+    for name, records in [('per_sample.csv', rows), ('per_object.csv', objects)]:
+        with (output / name).open('w', newline='', encoding='utf-8') as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(dict.fromkeys(k for row in records for k in row)))
+            writer.writeheader()
+            writer.writerows(records)
+    write_json(output / 'diagnostics.json', diagnostics)
+    if plan is not None:
+        write_json(output / 'frozen_plan.json', plan)
+    # Completion marker is written last, so interrupted evaluation can be replayed.
+    write_json(output / 'summary.json', summary)
+    return summary
+
+
+def train(model, saved, args, config):
+    import numpy as np
+    import torch
+    from torch.utils.data import DataLoader
+    from adaptive_resampling.v3_dataset import EpochSampler
+    from adaptive_resampling.v3_optimizer import make_optimizer
+    from adaptive_resampling.v3_training import require_training_profile
+    if config['variant'] == 'b0':
+        raise ValueError('B0 is frozen and cannot train')
+    ds = training_dataset(args, config)
+    loader = DataLoader(ds, sampler=EpochSampler(ds), batch_size=config['batch_size'], num_workers=config['workers'])
+    sampler = loader.sampler
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = make_optimizer(torch.optim.Adam, params, lr=config['lr'], fused=args.fused_optimizer)
+    output = args.output
+    identity = {'baseline_sha256': file_hash(args.baseline_checkpoint), 'metadata_sha256': data_identity(args.root),
+                'code_sha256': code_identity(), 'runtime': runtime_identity(args), 'config': config}
+    start, best, history = 0, float('inf'), []
+    if args.resume:
+        if saved['identity'] != identity or Path(saved['output']).resolve() != output.resolve():
+            raise ValueError('Resume requires original source/data/runtime/options/output')
+        require_training_profile(saved, ds.training_profile)
+        optimizer.load_state_dict(saved['optimizer'])
+        start, best, history = saved['completed_epochs'], saved['best_score'], saved['history']
+        torch.set_rng_state(saved['rng']['torch'].cpu())
+        np.random.set_state(saved['rng']['numpy'])
+        random.setstate(saved['rng']['python'])
+        if torch.cuda.is_available() and saved['rng']['cuda'] is not None:
+            torch.cuda.set_rng_state_all([state.cpu() for state in saved['rng']['cuda']])
+    elif output.exists():
+        raise FileExistsError(f'Use a fresh output or --resume: {output}')
+    output.mkdir(parents=True, exist_ok=True)
+    write_json(output / 'config.json', config)
+    write_json(output / 'manifest.json', {**identity, 'training_profile': ds.training_profile,
+        'partial_debug_run': bool(args.limit_batches or args.limit_samples),
+        'parameters': sum(p.numel() for p in model.parameters()), 'fused_optimizer': args.fused_optimizer,
+        'trainable_parameters': sum(p.numel() for p in params)})
+    def snapshot(completed):
+        return {'schema': 'pufm-module2-checkpoint-v1', 'config': config, 'identity': identity,
+            'baseline_sha256': identity['baseline_sha256'], 'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(), 'completed_epochs': completed,
+            'training_complete': completed == config['epochs'], 'selection_completed_epochs': completed,
+            'partial_debug_run': bool(args.limit_batches or args.limit_samples),
+            'training_profile': ds.training_profile, 'best_score': best, 'history': history, 'output': str(output.resolve()),
+            'rng': {'torch': torch.get_rng_state(), 'numpy': np.random.get_state(), 'python': random.getstate(),
+                    'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}}
+    if not args.resume:
+        # An interrupted first epoch can restart exactly; no extra checkpoint file.
+        save_checkpoint(output / 'last.pt', snapshot(0))
+    for epoch in range(start, config['epochs']):
+        model.train()
+        sampler.set_epoch(epoch)
+        total, batches, seen, components = 0., 0, 0, {}
+        started = time.perf_counter()
+        if args.device.startswith('cuda'):
+            torch.cuda.reset_peak_memory_stats()
+        for batch in loader:
+            batch = batch_to(batch, args.device)
+            if batch['input_xyz'].shape[1:] != (256, 3) or batch['gt_xyz'].shape[1:] != (1024, 3):
+                raise ValueError('Training budget must remain 256 -> 1024')
+            optimizer.zero_grad(set_to_none=True)
+            loss = model.training_loss(batch)
+            if not torch.isfinite(loss):
+                raise FloatingPointError('Non-finite loss')
+            loss.backward()
+            norm = torch.nn.utils.clip_grad_norm_(params, float('inf'), error_if_nonfinite=True)
+            if norm == 0:
+                raise RuntimeError('All trainable gradients are zero')
+            optimizer.step()
+            batches += 1
+            seen += len(batch['input_xyz'])
+            total += float(loss.detach()) * len(batch['input_xyz'])
+            for k, v in model.loss_diagnostics.items():
+                components[k] = components.get(k, 0.) + v * len(batch['input_xyz'])
+            if args.limit_batches and batches >= args.limit_batches:
+                break
+        record = {'epoch': epoch + 1, 'loss': total / seen, 'batches': batches, 'seen_patches': seen,
+                  'optimizer_steps': batches, 'training_seconds': time.perf_counter() - started,
+                  'peak_cuda_bytes': torch.cuda.max_memory_allocated() if args.device.startswith('cuda') else None,
+                  **{k: v / seen for k, v in components.items()}}
+        selection = None
+        if (epoch + 1) % config['validation_every'] == 0 or epoch + 1 == config['epochs']:
+            selection = evaluate(model, args, output / f'validation/epoch_{epoch + 1:04d}')
+            record['validation'] = selection['macro']
+        history.append(record)
+        score = selection['macro']['cd_l1'] if selection else float('inf')
+        improved = selection is not None and score < best
+        if improved:
+            best = score
+        payload = snapshot(epoch + 1)
+        if improved:
+            save_checkpoint(output / 'best.pt', payload)
+            write_json(output / 'best.json', {'epoch': epoch + 1, 'validation': selection['macro']})
+        # Commit last only after best, so a crash cannot lose the selected state.
+        save_checkpoint(output / 'last.pt', payload)
+        # Rewrite from checkpoint history; interrupted epoch replay cannot duplicate rows.
+        (output / 'train.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in history), encoding='utf-8')
+        print(json.dumps(record), flush=True)
+    if (output / 'best.pt').is_file():
+        chosen = read_checkpoint(output / 'best.pt')
+        chosen.update(training_complete=True, selection_completed_epochs=config['epochs'])
+        save_checkpoint(output / 'best.pt', chosen)
+    (output / 'train.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in history), encoding='utf-8')
+    ds.close()
+
+
+def smoke(model, args, config):
+    import torch
+    from models.screening_model import ScreeningPUFM
+    from models.utils import midpoint_interpolate
+    from types import SimpleNamespace
+    seed_all(config['seed'])
+    model.eval()
+    if args.real_patch:
+        ds = training_dataset(args, config)
+        sample = ds[(0, 0)]
+        batch = {k: torch.as_tensor(sample[k], device=args.device)[None] for k in ('input_xyz', 'gt_xyz')}
+        batch['supervision'] = {k: torch.as_tensor(v, device=args.device)[None] for k, v in sample['supervision'].items()}
+        ds.close()
+    else:
+        points = torch.randn(1, 256, 3, device=args.device) * .2
+        batch = {'input_xyz': points, 'gt_xyz': points.repeat_interleave(4, 1) + .001 * torch.randn(1, 1024, 3, device=args.device),
+                 'supervision': {'clean_input_xyz': points * .99}}
+    baseline = ScreeningPUFM({**config, 'variant': 'b0'}).to(args.device).eval()
+    baseline.flow.load_state_dict(model.flow.state_dict(), strict=True)
+    with torch.no_grad():
+        initial = midpoint_interpolate(SimpleNamespace(up_rate=4), batch['input_xyz'].transpose(1, 2).contiguous())
+        query = initial.clone()
+        for i in range(5):
+            query = query + baseline.flow(query, initial, query.new_full((len(query),), i / 5)) / 5
+        disabled = baseline(batch['input_xyz'])
+        torch.testing.assert_close(disabled, query.transpose(1, 2), atol=2e-6, rtol=2e-6)
+        output, diagnostics = model(batch['input_xyz'], return_diagnostics=True)
+        repeated = model(batch['input_xyz'])
+        torch.testing.assert_close(output, repeated, atol=0, rtol=0)
+        reloaded = ScreeningPUFM(config).to(args.device).eval()
+        reloaded.load_state_dict(model.state_dict(), strict=True)
+        torch.testing.assert_close(output, reloaded(batch['input_xyz']), atol=0, rtol=0)
+    loss, candidate_gradient = None, None
+    if config['variant'] != 'b0':
+        model.train()
+        optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'])
+        loss = model.training_loss(batch)
+        loss.backward()
+        gradients = [p.grad for p in model.parameters() if p.grad is not None]
+        if not gradients or not all(torch.isfinite(g).all() for g in gradients) or not any(g.abs().sum() > 0 for g in gradients):
+            raise AssertionError('No finite nonzero gradients')
+        if model.candidate is not None and any(True for _ in model.candidate.parameters()):
+            candidate_gradient = any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.candidate.parameters())
+            if not candidate_gradient:
+                raise AssertionError('Learned branch has no gradient')
+            if config['variant'] == 'spo_keypoint' and not any(p.grad is not None and p.grad.abs().sum() > 0
+                                                                              for p in model.candidate.query_ranking.parameters()):
+                raise AssertionError('Keypoint ranker has no supervised gradient')
+        optimizer.step()
+    whole = None
+    if args.whole_shape:
+        model.eval()
+        points = torch.randn(1, 2048, 3, device=args.device) * .2
+        calls = []
+        hook = model.flow.register_forward_pre_hook(lambda *_: calls.append(1))
+        with torch.no_grad():
+            whole = list(model(points).shape)
+        hook.remove()
+        if whole != [1, 8192, 3] or len(calls) != 5:
+            raise AssertionError('Whole-object point budget/flow evaluations changed')
+    result = {'experiment': config['experiment'], 'variant': config['variant'], 'status': 'passed',
+              'input': list(batch['input_xyz'].shape), 'output': list(output.shape), 'whole_output': whole,
+              'baseline_equivalence': True, 'repeat_exact': True, 'reload_exact': True,
+              'baseline_prediction_sha256': tensor_hash(disabled), 'input_sha256': tensor_hash(batch['input_xyz']),
+              'baseline_loaded': args.baseline_checkpoint.is_file(), 'real_patch': args.real_patch,
+              'loss': float(loss.detach()) if loss is not None else None, 'candidate_gradient': bool(candidate_gradient)
+                 if candidate_gradient is not None else None, 'runtime': runtime_identity(args),
+              'diagnostics': {k: v.detach().cpu().tolist() if hasattr(v, 'detach') else v for k, v in diagnostics.items()}}
+    if args.report:
+        write_json(args.report, result)
+    print(json.dumps(result), flush=True)
+
+
+def main():
+    from module_screening2.protocol import validate_config
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['train', 'validate', 'predict', 'smoke'])
+    parser.add_argument('--config', type=Path, default=LOCAL.parent / 'config.json')
+    parser.add_argument('--variant')
+    parser.add_argument('--root', type=Path, default=Path(os.environ.get('V3_DATA_ROOT', REPO / 'adaptive_resampling_data_v3')))
+    parser.add_argument('--baseline-checkpoint', type=Path, default=Path(os.environ.get('PUFM_BASELINE_CHECKPOINT', REPO / 'server_runs/patch32/pufm_baseline_b8_w0_a8_fused/epoch_0030.pt')))
+    parser.add_argument('--checkpoint', type=Path)
+    parser.add_argument('--resume', type=Path)
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--report', type=Path)
+    parser.add_argument('--split', choices=['validation', 'pu1k_object', 'modelnet40_object'], default='validation')
+    parser.add_argument('--whole-data-root', type=Path)
+    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--fps-backend', choices=['cuda', 'torch'])
+    parser.add_argument('--cpu-threads', type=int, default=8)
+    parser.add_argument('--limit-batches', type=int, default=0)
+    parser.add_argument('--limit-samples', type=int, default=0)
+    parser.add_argument('--allow-debug', action='store_true')
+    parser.add_argument('--fused-optimizer', action='store_true')
+    parser.add_argument('--real-patch', action='store_true')
+    parser.add_argument('--whole-shape', action='store_true')
+    for name in ['epochs', 'batch-size', 'workers', 'assignment-workers', 'validation-every']:
+        parser.add_argument('--' + name, type=int)
+    args = parser.parse_args()
+    config = json.loads(args.config.read_text(encoding='utf-8'))
+    owner = json.loads((LOCAL.parent / 'config.json').read_text(encoding='utf-8'))['experiment']
+    if config['experiment'] != owner:
+        parser.error('Configuration belongs to another physical copy')
+    if args.variant:
+        config['variant'] = args.variant
+    for name in ['epochs', 'batch_size', 'workers', 'assignment_workers', 'validation_every']:
+        if getattr(args, name) is not None:
+            config[name] = getattr(args, name)
+    validate_config(config)
+    if min(args.limit_batches, args.limit_samples) < 0 or args.cpu_threads < 1:
+        parser.error('Invalid debug/thread budget')
+    if args.resume and (args.command != 'train' or args.checkpoint):
+        parser.error('--resume is for the original training run only')
+    if args.command == 'train' and (args.checkpoint or args.split != 'validation'):
+        parser.error('Training starts from baseline and never uses frozen test objects')
+    frozen = config['variant'] in {'b0', 'uniform_random', 'pointsp_wrs', 'pointsp_ffps',
+                                   'dy_density_low', 'dy_density_high', 'dy_curvature', 'pointsp_lgp'}
+    if args.command in {'validate', 'predict'} and not args.checkpoint and not frozen:
+        parser.error('Learned candidate evaluation requires its own checkpoint')
+    if args.command == 'validate' and args.split != 'validation':
+        parser.error('Use predict explicitly for final frozen object tests')
+    args.root, args.baseline_checkpoint = args.root.resolve(), args.baseline_checkpoint.resolve()
+    args.output = (args.output or REPO / 'server_runs/patch32/module_screening2' / config['experiment'] / config['variant'] / args.command).resolve()
+    configure_runtime(args)
+    from adaptive_resampling.v3_transport import configure_assignment_workers
+    configure_assignment_workers(config['assignment_workers'])
+    seed_all(config['seed'])
+    model, saved = make_model(args, config, initialize=args.command != 'smoke' or args.baseline_checkpoint.is_file())
+    seed_all(config['seed'])
+    if args.command == 'smoke':
+        smoke(model, args, config)
+    elif args.command == 'train':
+        train(model, saved, args, config)
+    else:
+        print(json.dumps(evaluate(model, args, args.output, args.split, args.command == 'predict')['macro']), flush=True)
+
+
+if __name__ == '__main__':
+    main()
