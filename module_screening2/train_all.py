@@ -107,7 +107,8 @@ def preflight(args, plan):
     sources += list((REPO / 'adaptive_resampling').glob('*.py')) + [REPO / 'run_subset_eval.py']
     args.output.parent.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(args.output.parent).free
-    minimum = 1024**3 if args.limit_batches or args.limit_samples else 12 * 1024**3
+    # 14 runs x best/last ~= 3.9 GiB; 6 GiB includes metrics and atomic-write headroom.
+    minimum = 1024**3 if args.limit_batches or args.limit_samples else 6 * 1024**3
     if free < minimum:
         raise RuntimeError(f'Insufficient output filesystem space: {free / 1024**3:.2f} GiB; need {minimum / 1024**3:g} GiB')
     import torch

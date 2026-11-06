@@ -71,7 +71,9 @@ bash module_screening2/start_15epochs.sh
   comparison.json
 ```
 
-默认数据、权重位置沿用服务器既有目录。如路径不同可设置 `V3_DATA_ROOT`、`PUFM_BASELINE_CHECKPOINT`、`MODULE_SCREENING2_OUTPUT`。正式队列检查输出文件系统至少有 12 GiB 可用空间；不会自动清理任何旧文件。
+默认数据、权重位置沿用服务器既有目录。如路径不同可设置 `V3_DATA_ROOT`、`PUFM_BASELINE_CHECKPOINT`、`MODULE_SCREENING2_OUTPUT`。正式队列检查输出文件系统至少有 **6 GiB** 可用空间；不会自动清理任何旧文件。
+
+这里指硬盘空间。按已核验的原始完整 checkpoint 大小和新增参数量估算，14 项训练各保存 `best.pt` / `last.pt`，合计约 **3.9 GiB**；原子写入额外约 0.14 GiB，另加验证表、日志与余量，因此将原先保守的 12 GiB 门槛改为 6 GiB。数据和初始化权重共用，不复制；15 轮不会保留 15 份 epoch 权重。
 
 ```bash
 tail -f server_runs/patch32/module_screening2/sequential15_v1.console.log
