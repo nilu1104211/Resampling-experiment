@@ -4,13 +4,9 @@ from pathlib import Path
 import csv
 import json
 import statistics
-import os
 
 REPO = Path(__file__).resolve().parents[1]
-HISTORY = Path(os.environ.get('SCREENING_HISTORY_ROOT', REPO / 'server_runs')).resolve()
-SUITES = ('whole_object_eval80_20261030', 'whole_object_eval80_spu_20261102',
-          'whole_object_eval80_ours_20261102', 'whole_object_eval80_ours1_joint_b8_20261105',
-          'whole_object_eval80_ounet_20261105')
+REFERENCE = REPO / 'tools/whole_object_reference_20261110.json'
 METRICS = ('cd_l1', 'cd_l2_squared', 'hausdorff_l2', 'f_score')
 
 
@@ -40,10 +36,9 @@ def summarize(output, state):
             if key.endswith('/' + split) and ids != expected:
                 raise ValueError(f'Sample identities differ from the local baseline: {key}')
     previous = defaultdict(list)
-    for name in SUITES:
-        with (HISTORY / name / 'subset_summary.csv').open(encoding='utf-8-sig', newline='') as handle:
-            for row in csv.DictReader(handle):
-                previous[(row['model'], row['split'])].append(row)
+    reference = json.loads(REFERENCE.read_text(encoding='utf-8'))
+    for row in reference['historical_rows']:
+        previous[(row['model'], row['split'])].append(row)
     for (model, split), conditions in sorted(previous.items()):
         if len(conditions) != 7 or len({r['condition'] for r in conditions}) != 7:
             raise ValueError(f'Historical seven-condition summary incomplete: {model}/{split}')

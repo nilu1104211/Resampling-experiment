@@ -9,6 +9,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -22,10 +23,10 @@ DATA = Path(os.environ.get('V3_DATA_ROOT', REPO / 'adaptive_resampling_data_v3')
 HISTORY = Path(os.environ.get('SCREENING_HISTORY_ROOT', REPO / 'server_runs')).resolve()
 RUNS = Path(os.environ.get('SCREENING_RUNS_ROOT', HISTORY / 'patch32')).resolve()
 BASE = Path(os.environ.get('PUFM_BASELINE_CHECKPOINT', RUNS / 'pufm_baseline_b8_w0_a8_fused/epoch_0030.pt')).resolve()
-OUTPUT = HISTORY / 'whole_module_eval80_20261110'
+OUTPUT = HISTORY / 'whole_module_eval80_20261110_v2'
 OLD = RUNS / 'module_screening/sequential10_v1'
 NEW = RUNS / 'module_screening2/sequential15_v1'
-PREVIOUS = HISTORY / 'whole_object_eval80_20261030/subset_selections.json'
+REFERENCE = REPO / 'tools/whole_object_reference_20261110.json'
 default_whole = REPO / 'modelnet40_object80_seed21'
 if not default_whole.is_dir():
     default_whole = DATA / 'supplements/modelnet40_object80_seed21'
@@ -43,6 +44,38 @@ def sha(path):
 
 def read_json(path):
     return json.loads(Path(path).read_text(encoding='utf-8'))
+
+
+def load_reference(conditions):
+    reference = read_json(REFERENCE)
+    if reference['schema'] != 'fixed-v3-six-model-reference-v1':
+        raise ValueError('Unsupported historical reference schema')
+    models = ('pufm', 'pufmpp', 'spu', 'ours', 'ours1', 'ounet')
+    expected = {(model, split, condition) for model in models for split in SPLITS for condition in conditions}
+    rows = reference['historical_rows']
+    keys = {(r['model'], r['split'], r['condition']) for r in rows}
+    if len(rows) != len(expected) or keys != expected:
+        raise ValueError('Historical reference has missing or duplicate results')
+    for row in rows:
+        if row['objects'] != 80 or row['samples'] != 80 or not all(
+                math.isfinite(float(row[m])) for m in ('cd_l1', 'cd_l2_squared', 'hausdorff_l2', 'f_score')):
+            raise ValueError('Invalid historical result in reference')
+    for split in SPLITS:
+        objects = reference['selection'][split]
+        if len(objects) != 80 or len({o['object_id'] for o in objects}) != 80:
+            raise ValueError(f'Invalid historical object selection: {split}')
+    return reference
+
+
+def check_reference_plan(plan, split, reference):
+    if plan['metadata_sha256'] != reference['metadata_sha256'][split]:
+        raise ValueError(f'V3 metadata differs from the six-model test: {split}')
+    if split == 'modelnet40_object' and plan['supplement_manifest_sha256'] != reference['supplement_manifest_sha256']:
+        raise ValueError('ModelNet40 supplement differs from the six-model test')
+    selection = [{'object_id': o['object_id'], 'dataset_indices': o['dataset_indices']}
+                 for o in plan['selection']['objects']]
+    if selection != reference['selection'][split]:
+        raise ValueError(f'Whole-object selection differs from the previous six-model test: {split}')
 
 
 def write_json(path, data):
@@ -142,9 +175,7 @@ def preflight(tasks, output):
     for task in tasks:
         audit_task(task, metadata, baseline_hash)
         print(f"PREFLIGHT {task['generation']}:{task['name']} passed", flush=True)
-    previous = read_json(PREVIOUS)
-    historical_plan = {p['split']: p for p in read_json(
-        HISTORY / 'whole_object_eval80_20261030/suite_evaluation_manifest.json')['plans']}
+    reference = load_reference(CONDITIONS)
     for split in SPLITS:
         args = SimpleNamespace(repo=REPO, root=DATA, output=output, split=split, objects=80,
             patches_per_object=None, seed=21, conditions=CONDITIONS, models=['pufm'], calibration_samples=256,
@@ -152,28 +183,7 @@ def preflight(tasks, output):
             pufm_checkpoint=BASE, whole_data_root=WHOLE)
         plan = make_plan(args)
         validate_supplement(plan)
-        if plan['metadata_sha256'] != historical_plan[split]['metadata_sha256']:
-            raise ValueError(f'V3 metadata differs from the six-model test: {split}')
-        if split == 'modelnet40_object' and plan['supplement_manifest_sha256'] != historical_plan[split]['supplement_manifest_sha256']:
-            raise ValueError('ModelNet40 supplement differs from the six-model test')
-        if [(o['object_id'], o['dataset_indices']) for o in plan['selection']['objects']] != [
-                (o['object_id'], o['dataset_indices']) for o in previous[split]['objects']]:
-            raise ValueError(f'Whole-object selection differs from the previous six-model test: {split}')
-    from summarize_screening_whole import SUITES
-    for name in SUITES:
-        suite = HISTORY / name
-        if not (suite / 'subset_summary.csv').is_file():
-            raise FileNotFoundError(f'Missing previous network result: {name}/subset_summary.csv')
-        selections = read_json(suite / 'subset_selections.json')
-        suite_plans = {p['split']: p for p in read_json(suite / 'suite_evaluation_manifest.json')['plans']}
-        for split in SPLITS:
-            if [(o['object_id'], o['dataset_indices']) for o in selections[split]['objects']] != [
-                    (o['object_id'], o['dataset_indices']) for o in previous[split]['objects']]:
-                raise ValueError(f'Historical object selection differs: {name}/{split}')
-            if suite_plans[split]['metadata_sha256'] != historical_plan[split]['metadata_sha256']:
-                raise ValueError(f'Historical dataset metadata differs: {name}/{split}')
-            if split == 'modelnet40_object' and suite_plans[split]['supplement_manifest_sha256'] != historical_plan[split]['supplement_manifest_sha256']:
-                raise ValueError(f'Historical ModelNet40 supplement differs: {name}')
+        check_reference_plan(plan, split, reference)
     print(f'PREFLIGHT all {len(tasks)} candidates and both frozen test datasets passed', flush=True)
 
 
@@ -247,10 +257,7 @@ def worker(task, split, output, limit):
         pufm_checkpoint=BASE, whole_data_root=WHOLE)
     plan = make_plan(plan_args)
     validate_supplement(plan)
-    previous = read_json(PREVIOUS)[split]
-    if [(o['object_id'], o['dataset_indices']) for o in plan['selection']['objects']] != [
-            (o['object_id'], o['dataset_indices']) for o in previous['objects']]:
-        raise ValueError('Whole-object selection differs from the previous six-model test')
+    check_reference_plan(plan, split, load_reference(CONDITIONS))
     from adaptive_resampling import v3_metrics
     evaluate_sample = v3_metrics.evaluate_sample
     progress = {'count': 0}
@@ -278,6 +285,7 @@ def worker(task, split, output, limit):
                         'gpu': torch.cuda.get_device_name(), 'fps_backend': 'cuda', 'pointops': 'portable_torch',
                         'matmul_tf32': False, 'cudnn_tf32': False, 'deterministic_algorithms': True},
         'data_metadata_sha256': metadata, 'same_object_selection_as_original_six_models': True,
+        'historical_reference_sha256': sha(REFERENCE),
         'elapsed_seconds': time.time() - started})
     print(json.dumps({'task': task['name'], 'split': split, 'samples': result['samples'],
                       'cd_l1': result['macro']['cd_l1'], 'elapsed': time.time() - started}), flush=True)
@@ -307,7 +315,8 @@ def main():
     config = {'jobs': all_jobs, 'splits': SPLITS, 'limit_samples': args.limit_samples,
               'data': str(DATA), 'whole_data_root': str(WHOLE), 'history_root': str(HISTORY),
               'baseline_sha256': sha(BASE), 'script_sha256': sha(Path(__file__)),
-              'summary_script_sha256': sha(REPO / 'tools/summarize_screening_whole.py')}
+              'summary_script_sha256': sha(REPO / 'tools/summarize_screening_whole.py'),
+              'historical_reference_sha256': sha(REFERENCE)}
     if manifest_path.exists():
         state = read_json(manifest_path)
         if state['config'] != json.loads(json.dumps(config)):
