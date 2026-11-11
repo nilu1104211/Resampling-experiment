@@ -62,7 +62,17 @@ python -B our2/run.py train --config our2/configs/baseline.json --output server_
 
 训练开始先验证 epoch 0，之后每轮验证。生成阶段按 7 条件等权、先物体内聚合的 CD-L1 选 `best.pt`；纯辅助头阶段按对应验证辅助损失选择，避免所有初始化相同导致永远选 epoch 0。每阶段仅保存 `best.pt` 和 `last.pt`，不保存每轮全量权重。`last.pt` 用于续跑，`best.pt` 用于阶段衔接和评估。`best.json` 明确所选轮次；可能选择 epoch 0，此时不能宣称续训有效。
 
-正式阶段队列（需要先审查 P0；本次开发没有启动这个完整预算）：
+已有训练好的 PUFM 后，可以先筛选 M1、M2 和 Joint。以下队列共七个阶段，每阶段 5 轮，总计 35 轮。`--baseline-checkpoint` 可选择 P0 使用的 `pufm_baseline_b8_w0_a8_fused/epoch_0030.pt`，也可直接选择前一阶段的 `pufm_common_b8_w0_a8_fused/epoch_0060.pt`。
+
+```bash
+python -u -B tools/train_our2_modules.py --root "$V3_DATA_ROOT" --baseline-checkpoint "$PUFM_BASELINE_CHECKPOINT" --output server_runs/our2_modules_seed21_b8 --epochs 5 --batch-size 8 --seed 21
+```
+
+使用第 60 轮权重时，为队列指定独立的输出目录，例如 `server_runs/our2_modules_from60_seed21_b8`。前两批单模块和 P0 均使用之后又训练了 30 轮的 `epoch_0030.pt`，它们的结果可作为历史参考。以第 60 轮为起点的筛选使用同一起点做主对照。
+
+每个阶段的配置保存在队列输出的 `configs/`，训练进度见日志与 `queue.json`。队列生成的 `configs/baseline.json` 绑定本次起点，可传给 `run.py validate` 并同时传入同一 `--baseline-checkpoint`，直接评估起始 PUFM。后续可对入选模块使用该配置和对应的 `--epochs`、独立输出目录补做续训对照。中断后用原命令加 `--resume`。如果在写出首个 `last.pt` 前中断，先将该阶段的输出目录移到一旁，再续跑。
+
+需要同时完成全部预算对照时，使用完整队列。
 
 ```bash
 python -B our2/pipeline.py --root "$V3_DATA_ROOT" --baseline-checkpoint "$PUFM_BASELINE_CHECKPOINT" --output server_runs/our2_seed21 --epochs 5 --seed 21
