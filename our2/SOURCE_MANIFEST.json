@@ -1,0 +1,38 @@
+{
+  "PUFM-main/models/diffusion.py": {
+    "source": "baseline/PUFM-main/models/diffusion.py",
+    "source_sha256": "2dbeb73a8af388a083e946caf5fa235f6fd73dbae36f06840e64b208b15234be",
+    "copy_sha256": "2dbeb73a8af388a083e946caf5fa235f6fd73dbae36f06840e64b208b15234be",
+    "identical": true
+  },
+  "PUFM-main/models/pointnet2_util.py": {
+    "source": "baseline/PUFM-main/models/pointnet2_util.py",
+    "source_sha256": "523ee80fedd87b232943d09adafa2e5c7fa2b91528074040fb077b76bf40a45c",
+    "copy_sha256": "4d84250d3c6f0c4ee0c76472911359e68ced75f4f472d2540ec54cd4c3f1df30",
+    "identical": false
+  },
+  "PUFM-main/models/utils.py": {
+    "source": "baseline/PUFM-main/models/utils.py",
+    "source_sha256": "8c99bb3b9192fdced550dbe5194987965d6f536967c5e223af718a13bb4f56c9",
+    "copy_sha256": "eacd274c5c03879d31c36b5c4152051b33cd6142b647dcf42cedcd80c0d4cc50",
+    "identical": false
+  },
+  "PUFM-main/models/pointops_compat.py": {
+    "source": "module_screening2/control/PUFM-main/models/pointops_compat.py",
+    "source_sha256": "d7f62208d06f1239d8234cfbf3faf0a7310bcb5f519bbb562ede177ca38ae8ad",
+    "copy_sha256": "d7f62208d06f1239d8234cfbf3faf0a7310bcb5f519bbb562ede177ca38ae8ad",
+    "identical": true
+  },
+  "PUFM-main/models/adaptive_ops.py": {
+    "source": "module_screening2/control/PUFM-main/models/adaptive_ops.py",
+    "source_sha256": "8a6f32582abfe11afca665de84d01d9fb7687a6ca999c540ce4a9d981a02042d",
+    "copy_sha256": "8a6f32582abfe11afca665de84d01d9fb7687a6ca999c540ce4a9d981a02042d",
+    "identical": true
+  },
+  "run.py": {
+    "source": "module_screening2/control/PUFM-main/screening.py",
+    "source_sha256": "30993b666fac0d1aa4a2d668b8f121acf08f4f2d4c0c4b32e9c396ee9c57c1a7",
+    "copy_sha256": "b09cd6501f4ed3b964692478ba4a9566f6039ec70a0e30d4c6dc55fa93adea3a",
+    "identical": false
+  }
+}
