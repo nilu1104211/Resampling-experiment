@@ -20,9 +20,9 @@ PANELS = (
 )
 
 
-def render(path, output, limits=None):
+def render(path, output, limits=None, panels=PANELS):
     with np.load(path, allow_pickle=False) as data:
-        clouds = [data[key] for key, _ in PANELS]
+        clouds = [data[key] for key, _ in panels]
         if any(cloud.ndim != 2 or cloud.shape[1] != 3 or not np.isfinite(cloud).all() for cloud in clouds):
             raise ValueError(f"Invalid example point clouds: {path}")
         if limits is None:
@@ -32,7 +32,7 @@ def render(path, output, limits=None):
         center = (low + high) / 2
         radius = max(float((high - low).max()) * 0.53, 1e-5)
         figure = plt.figure(figsize=(12, 6.5), layout="constrained")
-        for index, ((key, title), cloud) in enumerate(zip(PANELS, clouds), 1):
+        for index, ((key, title), cloud) in enumerate(zip(panels, clouds), 1):
             ax = figure.add_subplot(2, 4, index, projection="3d")
             colors = "#275b79"
             if key == "observed":
