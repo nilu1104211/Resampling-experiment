@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 from adaptive_resampling.v3_metrics import evaluate_sample
-from our2_diagnosis_inference import measure, predict_paths, proxy_rows, render_example, save_example
+from our2_diagnosis_inference import measure, predict_paths, proxy_rows, save_example
 from our2_diagnosis_report import report
 from our2_diagnosis_training import TRAIN_GROUPS, load_trained, probe, train_group
 from our2_v56 import EXAMPLE_CONDITIONS
@@ -28,6 +28,12 @@ from our2_v56 import EXAMPLE_CONDITIONS
 
 STAGES = {"B0": "baseline", "M1": "m1_refine", "M2": "m2_hard", "Joint": "joint_finetune"}
 WHOLE = ("pu1k_object", "modelnet40_object")
+# Commit 64b70b7, in LF and CRLF checkouts. Its only result-format difference
+# from this entry point is the extra PNGs. Other sources still have to match.
+PLOT_QUEUE_ENTRY_SHA256 = {
+    "c981e03b17bdd7c4bdda3a17779cbe4d5c6986eab2ccb8c84b827c1cc4d6973c",
+    "7322979e52c95c4e08caa971fa6eb253b3495ab238bf1c338064c591fc69e0cb",
+}
 
 
 class Queue:
@@ -126,6 +132,31 @@ def git(*argv):
     return subprocess.check_output(["git", *argv], cwd=REPO, text=True, encoding="utf-8").strip()
 
 
+def comparable_manifest(record):
+    return {key: value for key, value in record.items()
+            if key not in {"git_head", "git_dirty", "resumed_without_figures_from"}}
+
+
+def resume_manifest(path, current):
+    previous = read_json(path)
+    if comparable_manifest(previous) == comparable_manifest(current):
+        return previous
+
+    entry = Path(__file__).name
+    sources = dict(previous.get("diagnosis_source_sha256", {}))
+    if sources.get(entry) in PLOT_QUEUE_ENTRY_SHA256:
+        old_entry_hash = sources[entry]
+        sources[entry] = current["diagnosis_source_sha256"][entry]
+        if comparable_manifest({**previous, "diagnosis_source_sha256": sources}) == comparable_manifest(current):
+            migrated = {**current, "resumed_without_figures_from": {
+                "git_head": previous["git_head"], "entry_sha256": old_entry_hash,
+            }}
+            run.write_json(path, migrated)
+            print("Resuming the existing diagnosis with PNG rendering removed.", flush=True)
+            return migrated
+    raise ValueError("Existing run has a different source/data/runtime/config fingerprint. Use a new --output.")
+
+
 def manifest(args):
     paths = {key: str(value) for key, value in vars(args).items() if isinstance(value, Path)}
     inputs = {}
@@ -162,13 +193,7 @@ def manifest(args):
         raise ValueError("Wrong PUFM-60 checkpoint SHA256")
     marker = args.output / "manifest.json"
     if marker.exists():
-        old = read_json(marker)
-        volatile = {"git_head", "git_dirty"}
-        if {k: v for k, v in old.items() if k not in volatile} != {
-            k: v for k, v in result.items() if k not in volatile
-        }:
-            raise ValueError("Existing run has a different source/data/runtime/config fingerprint. Use a new --output.")
-        return old
+        return resume_manifest(marker, result)
     run.write_json(marker, result)
     return result
 
@@ -274,10 +299,9 @@ def frozen(args, mode, split, conditions, folder, fixed=False, regression=False)
                     evidence["proxy_gain"].extend(proxy_rows(context[0], sample, key))
                 if not regression and (fixed or not seen) and condition in EXAMPLE_CONDITIONS:
                     stem = f"{condition}_{run.signature(sample['object_id'])[:10]}"
-                    example, figure = folder / "examples" / f"{stem}.npz", folder / "figures" / f"{stem}.png"
+                    example = folder / "examples" / f"{stem}.npz"
                     save_example(example, sample, initial, context, traces, mode)
-                    render_example(example, figure, mode)
-                    saved += [example, figure]
+                    saved.append(example)
                 seen.add(sample["sample_id"])
         finally:
             ds.close()

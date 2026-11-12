@@ -10,7 +10,7 @@
 | Joint | 同一已训练 Joint Flow 上的 J0–J4；条件开关、硬分配前后、M1 修正及逐步结果 |
 | 梯度 | 在 v3 训练集的七种在线退化分层中固定取 21 个样本；测真实损失、参数梯度、辅助与生成梯度方向和探针更新 |
 | 匹配训练 | T0 / T1 / T2 和 D0-FT / D1-L-FT / D1-U-FT。T0 与 D0-FT 共用同一训练与评估；B1 经身份、配置和更新预算校验后可复用为 T0 |
-| 整物体 | 默认生成 PU1K 和 ModelNet40 各两物体的 A0/C2/D7/E2 成对图与轨迹；`--whole-regression` 额外跑两个固定 80 物体名单的关键对照 |
+| 整物体 | 默认保存 PU1K 和 ModelNet40 各两物体的 A0/C2/D7/E2 指标、点云与轨迹 NPZ；`--whole-regression` 额外跑两个固定 80 物体名单的关键对照 |
 
 M1 两个训练分支共用 `m1_hole/best.pt`。T1 在最后五轮关闭位移，只适配 Flow；T2 在相同窗口开启原 M1 修正与损失。M2 使用冻结的预算头，L 和 U 各自适配 Flow。为复用同一纯 Flow 对照，各组最后窗口沿用 M1 的第 70 轮数据偏移、seed 21、batch 8 和 Flow LR `1e-6`。训练保存 epoch 0、每轮验证、`best.pt`、`last.pt`，诊断配对使用相同更新预算下的 `last.pt`。已有头预热单独记录。
 
@@ -64,5 +64,7 @@ tail -f server_runs/our2_logs/full_diagnosis_from60_seed21.log
 ```
 
 中断后用同一条启动命令续跑。队列逐任务验证已完成产物的 SHA256，训练使用各组 `last.pt` 从最近完整 epoch 恢复。若改动源码、运行时、输入或回归设置，使用新的 `--output`。同一个正式目录一次只运行一个进程，由 `flock` 防止重复启动。
+
+队列直接保存点云与轨迹 NPZ，可以在没有 `matplotlib` 的环境里运行。如果旧版队列已经因绘图缺包而报错，等旧进程退出，再更新代码并使用原输出目录和参数启动。程序会检查旧版指纹，复用校验通过的任务，并重跑失败项。按 Ctrl+C 退出 `tail -f` 只会停止查看日志。
 
 收集整个 `server_runs/our2_full_diagnosis_from60_seed21/`，优先查看 `queue.json`、`failures.json`、`manifest.json` 和 `reports/diagnosis_summary.md`。汇总表 `comparison_all.csv`、`sample_diagnostics.csv`、`paired_summary.csv` 与各模块诊断表都在 `reports/`。日志最后的 `OUR2 DIAGNOSIS COMPLETED` 表示队列全部通过。出现 `PARTIAL` 时按 `failures.json` 查看失败和阻断项，其他已完成项仍可分析。
