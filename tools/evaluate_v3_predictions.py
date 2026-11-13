@@ -5,6 +5,7 @@ NPZ fields: sample_id (Unicode array), prediction_xyz (S x M x 3).
 import argparse
 from collections import defaultdict
 import csv
+import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -25,7 +26,16 @@ def evaluate(path, root, split, condition, output, *, coordinates="model", p2f=F
     if len(set(ids)) != len(ids):
         raise ValueError("Duplicate prediction sample IDs")
     positions = {name: i for i, name in enumerate(ids)}
-    dataset = AdaptiveResamplingDataset(root, split, condition=condition, include_supervision=True, include_reference_metadata=p2f)
+    if split == "modelnet40_holdout":
+        location = Path(__file__).resolve().parents[1] / "our" / "PUFM-main" / "baseline_validation.py"
+        spec = importlib.util.spec_from_file_location("pufm_baseline_validation", location)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        dataset = module.ModelNet40HoldoutDataset(root, condition, include_supervision=True,
+                                                 include_reference_metadata=p2f)
+    else:
+        dataset = AdaptiveResamplingDataset(root, split, condition=condition, include_supervision=True,
+                                            include_reference_metadata=p2f)
     rows, seen = [], set()
     try:
         for i in range(len(dataset)):
@@ -89,7 +99,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("predictions")
     parser.add_argument("--root", default=str(DEFAULT_ROOT))
-    parser.add_argument("--split", choices=["validation", "pu1k_patch", "modelnet40_patch", "pu1k_object"], required=True)
+    parser.add_argument("--split", choices=["validation", "pu1k_patch", "modelnet40_patch",
+                                            "modelnet40_holdout", "pu1k_object"], required=True)
     parser.add_argument("--condition", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--coordinates", choices=["model", "canonical", "raw"], default="model")

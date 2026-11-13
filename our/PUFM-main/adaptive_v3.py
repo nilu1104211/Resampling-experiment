@@ -8,6 +8,7 @@ import os
 import random
 import sys
 import time
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -22,6 +23,8 @@ from models.adaptive_wrapper import AdaptivePUFM, AdaptiveConfig
 from models.adaptive_losses import flow_loss, recovery_losses, gain_loss, retention_loss
 from models.adaptive_ops import cd_l1
 from gain_teacher import paired_labels, write_cache, generator_signature, stable_seed
+from baseline_validation import BaselineValidation, ModelNet40HoldoutDataset, atomic_save
+from pu1k_sparse_dataset import PU1KSparseDataset, source_digest
 
 
 def preset(name):
@@ -39,6 +42,12 @@ def preset(name):
 def dataset(args, split, supervision=False):
     if split == "official":
         return OfficialPU1KDataset(args.root)
+    if split == "modelnet40_holdout":
+        return ModelNet40HoldoutDataset(args.root, args.condition, include_supervision=supervision)
+    if args.data_source == "pu1k-h5" and split == "train":
+        if args.training_mode != "clean":
+            raise ValueError("Original PU1K HDF5 requires --training-mode clean")
+        return PU1KSparseDataset(args.pu1k_h5, split, source_sha256=args.pu1k_sha256)
     return AdaptiveResamplingDataset(args.root, split, condition=None if split == "train" else args.condition,
                                      training_mode=args.training_mode, include_supervision=supervision,
                                      augment_rotation=split == "train",
@@ -107,13 +116,16 @@ def tensor_batch(batch, device):
         key: value.to(device) for key, value in batch.get("supervision", {}).items()}
 
 
-def save_checkpoint(path, model, optimizer, epoch, args, stages, debug=False):
-    torch.save({"protocol": "V3", "configuration": asdict(model.config), "model": model.state_dict(),
+def save_checkpoint(path, model, optimizer, epoch, args, stages, debug=False, best_validation=None):
+    payload = {"protocol": "V3", "configuration": asdict(model.config), "model": model.state_dict(),
                 "training_profile": args.training_profile,
                 "optimizer": optimizer.state_dict(), "epoch": epoch, "stage": args.stage,
                 "trained_stages": stages, "args": vars(args), "partial_debug_run": debug,
                 "rng": {"torch": torch.get_rng_state(), "numpy": np.random.get_state(), "python": random.getstate(),
-                        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}}, path)
+                        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}}
+    if best_validation is not None:
+        payload["best_validation"] = best_validation
+    atomic_save(payload, path)
 
 
 def train(model, saved, args):
@@ -142,6 +154,8 @@ def train(model, saved, args):
     start = 0
     stages = list(saved.get("trained_stages", [])) if saved else []
     if args.resume:
+        if (saved.get("partial_debug_run") and not (args.max_batches or args.validation_limit or args.allow_debug)):
+            raise ValueError("Resume cannot turn a debug checkpoint into a formal run; start a new run")
         if saved.get("args", {}).get("training_mode") != args.training_mode:
             raise ValueError("Resume cannot change the training data mode")
         require_training_profile(saved, ds.training_profile)
@@ -157,6 +171,7 @@ def train(model, saved, args):
         stages.append(args.stage)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
+    selection = BaselineValidation(args, saved if args.resume else None) if args.stage == "baseline" else None
     for epoch in range(start, args.epochs):
         sampler.set_epoch(epoch)
         model.train()
@@ -201,9 +216,20 @@ def train(model, saved, args):
                 break
         report = {"epoch": epoch, "stage": args.stage, "loss": float(np.mean(values)), "batches": len(values),
                   "partial_debug_run": bool(args.max_batches)}
-        debug = bool(args.max_batches or args.allow_debug or args.stage == "rgr" and saved and saved.get("partial_debug_run"))
-        save_checkpoint(out / "last.pt", model, optimizer, epoch, args, stages, debug=debug)
-        if (epoch + 1) % args.save_every == 0:
+        debug = bool(args.max_batches or args.allow_debug or args.stage == "rgr" and saved and saved.get("partial_debug_run")
+                     or selection and args.validation_limit)
+        report["partial_debug_run"] = debug
+        improved = False
+        if selection is not None:
+            validation, improved = selection.evaluate(model, epoch)
+            report["validation"] = validation
+            report["best_validation"] = selection.best
+        save_checkpoint(out / "last.pt", model, optimizer, epoch, args, stages, debug=debug,
+                        best_validation=selection.best if selection else None)
+        if selection and improved:
+            save_checkpoint(out / "best.pt", model, optimizer, epoch, args, stages, debug=debug,
+                            best_validation=selection.best)
+        if selection is None and (epoch + 1) % args.save_every == 0:
             save_checkpoint(out / f"epoch_{epoch + 1:04d}.pt", model, optimizer, epoch, args, stages, debug=debug)
         with (out / "train.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(report) + "\n")
@@ -443,9 +469,13 @@ def main():
     parser.add_argument("--backbone", choices=["pufm", "pufm_w_attn"])
     parser.add_argument("--stage", choices=["baseline", "rgr", "joint"], default="baseline")
     parser.add_argument("--root", default=str(DEFAULT_ROOT))
-    parser.add_argument("--split", default="train", choices=["train", "validation", "pu1k_patch", "pu1k_object", "modelnet40_patch", "official"])
+    parser.add_argument("--data-source", choices=["pu1k-h5", "v3"],
+                        help="Baseline defaults to PU1K HDF5; select v3 for mesh-resampled data")
+    parser.add_argument("--pu1k-h5", type=Path, help="Original training HDF5 with poisson_256/poisson_1024")
+    parser.add_argument("--split", default="train", choices=["train", "validation", "pu1k_patch", "pu1k_object",
+                                                               "modelnet40_patch", "modelnet40_holdout", "official"])
     parser.add_argument("--condition")
-    parser.add_argument("--training-mode", choices=["mixed", "clean"], default="mixed")
+    parser.add_argument("--training-mode", choices=["mixed", "clean"], default=None)
     parser.add_argument("--train-patches-per-object", type=int, default=DEFAULT_TRAIN_PATCHES_PER_OBJECT,
                         help="Fixed shared patches per training object (default: 32; 0: all stored patches)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -471,6 +501,8 @@ def main():
     parser.add_argument("--online-teacher-every", type=int, default=10)
     parser.add_argument("--save-every", type=int, default=5)
     parser.add_argument("--max-batches", type=int, default=0)
+    parser.add_argument("--validation-limit", type=int, default=0,
+                        help="Debug only: use at most this many clean validation patches")
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--samples", type=int, default=128)
     parser.add_argument("--pairs", type=int, default=4)
@@ -487,16 +519,34 @@ def main():
     for key in ["regions", "capacity", "minimum", "flow-steps", "swap-step", "swap-iterations"]:
         parser.add_argument("--" + key, type=int)
     args = parser.parse_args()
+    if args.data_source is None:
+        args.data_source = "pu1k-h5" if args.command == "train" and args.stage == "baseline" else "v3"
+    if args.training_mode is None:
+        args.training_mode = "clean" if args.command == "train" and args.stage == "baseline" else "mixed"
     if args.command == "train-gain":
         args.stage = "gain"
+    if args.command == "train" and args.stage == "baseline":
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True)
     if args.checkpoint and args.resume:
         parser.error("Use either --checkpoint or --resume")
     if min(args.epochs, args.batch_size, args.gain_batch_size, args.online_teacher_every, args.save_every, args.samples, args.pairs) < 1:
         parser.error("Counts and frequencies must be positive")
     if args.assignment_workers < 1:
         parser.error("--assignment-workers must be positive")
-    if args.train_patches_per_object < 0:
-        parser.error("--train-patches-per-object must be nonnegative")
+    if args.data_source == "pu1k-h5" and args.command == "train":
+        if args.stage != "baseline" or args.pu1k_h5 is None or args.training_mode != "clean":
+            parser.error("PU1K HDF5 training requires --stage baseline, --pu1k-h5 and --training-mode clean")
+        if not args.pu1k_h5.is_file():
+            parser.error("Provide an existing PU1K training HDF5")
+        args.pu1k_h5 = str(args.pu1k_h5.resolve())
+        args.pu1k_sha256 = source_digest(args.pu1k_h5)
+        print(json.dumps({"pu1k_h5": args.pu1k_h5, "sha256": args.pu1k_sha256}), flush=True)
+    if args.train_patches_per_object < 0 or args.validation_limit < 0:
+        parser.error("--train-patches-per-object and --validation-limit must be nonnegative")
     configure_assignment_workers(args.assignment_workers)
     seed_all(args.seed)
     model, saved = create_model(args)
