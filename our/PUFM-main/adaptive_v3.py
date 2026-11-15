@@ -43,7 +43,8 @@ def dataset(args, split, supervision=False):
     if split == "official":
         return OfficialPU1KDataset(args.root)
     if split == "modelnet40_holdout":
-        return ModelNet40HoldoutDataset(args.root, args.condition, include_supervision=supervision)
+        return ModelNet40HoldoutDataset(args.root, args.condition, include_supervision=supervision,
+                                        objects_per_class=args.modelnet40_objects_per_class)
     if args.data_source == "pu1k-h5" and split == "train":
         if args.training_mode != "clean":
             raise ValueError("Original PU1K HDF5 requires --training-mode clean")
@@ -374,6 +375,8 @@ def predict(model, saved, args):
     result = {"protocol": "V3", "samples": total, "points": count, "split": args.split, "condition": args.condition,
               "coordinates": "model", "configuration": asdict(model.config), "checkpoint": args.checkpoint,
               "partial_debug_run": bool(args.allow_debug or total < len(ds)), "diagnostics": str(diagnostic_file)}
+    if args.modelnet40_objects_per_class is not None:
+        result["modelnet40_objects_per_class"] = args.modelnet40_objects_per_class
     destination.with_suffix(".json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
 
@@ -475,6 +478,8 @@ def main():
     parser.add_argument("--split", default="train", choices=["train", "validation", "pu1k_patch", "pu1k_object",
                                                                "modelnet40_patch", "modelnet40_holdout", "official"])
     parser.add_argument("--condition")
+    parser.add_argument("--modelnet40-objects-per-class", type=int,
+                        help="Use a fixed subset of ModelNet40 holdout objects per class")
     parser.add_argument("--training-mode", choices=["mixed", "clean"], default=None)
     parser.add_argument("--train-patches-per-object", type=int, default=DEFAULT_TRAIN_PATCHES_PER_OBJECT,
                         help="Fixed shared patches per training object (default: 32; 0: all stored patches)")
@@ -519,6 +524,9 @@ def main():
     for key in ["regions", "capacity", "minimum", "flow-steps", "swap-step", "swap-iterations"]:
         parser.add_argument("--" + key, type=int)
     args = parser.parse_args()
+    if args.modelnet40_objects_per_class is not None and (
+            args.command != "predict" or args.split != "modelnet40_holdout" or args.modelnet40_objects_per_class < 1):
+        parser.error("--modelnet40-objects-per-class requires a positive count and predict --split modelnet40_holdout")
     if args.data_source is None:
         args.data_source = "pu1k-h5" if args.command == "train" and args.stage == "baseline" else "v3"
     if args.training_mode is None:

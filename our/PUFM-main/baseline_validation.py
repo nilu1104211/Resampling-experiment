@@ -1,5 +1,6 @@
 """Fixed ModelNet40 validation and resumable best-checkpoint selection."""
 
+from collections import defaultdict
 from contextlib import contextmanager
 import hashlib
 import json
@@ -12,6 +13,7 @@ from scipy.spatial import cKDTree
 import torch
 
 from adaptive_resampling.v3_dataset import AdaptiveResamplingDataset
+from adaptive_resampling.v3_core import seed
 
 
 def digest_file(path):
@@ -83,12 +85,33 @@ def modelnet_validation(root, *, condition="A0_normal", include_supervision=Fals
 class ModelNet40HoldoutDataset:
     """The frozen ModelNet40 V3 objects outside the validation selection."""
 
-    def __init__(self, root, condition, *, include_supervision=False, include_reference_metadata=False):
+    def __init__(self, root, condition, *, include_supervision=False, include_reference_metadata=False,
+                 objects_per_class=None):
+        if objects_per_class is not None and objects_per_class < 1:
+            raise ValueError("ModelNet40 objects per class must be positive")
         self.dataset, selected, _, _ = modelnet_validation(
             root, condition=condition, include_supervision=include_supervision,
             include_reference_metadata=include_reference_metadata)
         val = set(selected)
-        self.indices = [i for i in range(len(self.dataset)) if i not in val]
+        if objects_per_class is None:
+            self.indices = [i for i in range(len(self.dataset)) if i not in val]
+        else:
+            groups = defaultdict(list)
+            start = 0
+            for entry, end in zip(self.dataset.entries, self.dataset.ends):
+                object_id = entry["object_id"]
+                objects = groups[object_id.rsplit("_", 1)[0]]
+                if start not in val:
+                    objects.append((object_id, start, end))
+                start = end
+            if len(groups) != 40 or any(len(objects) < objects_per_class for objects in groups.values()):
+                self.dataset.close()
+                raise ValueError(f"ModelNet40 holdout requires {objects_per_class} eligible objects in each of 40 classes")
+            self.indices = []
+            for _, objects in sorted(groups.items()):
+                ranked = sorted(objects, key=lambda row: (seed("modelnet40_holdout", 21, row[0]), row[0]))
+                for _, start, end in ranked[:objects_per_class]:
+                    self.indices.extend(range(start, end))
         if not self.indices:
             self.dataset.close()
             raise ValueError("ModelNet40 holdout is empty")

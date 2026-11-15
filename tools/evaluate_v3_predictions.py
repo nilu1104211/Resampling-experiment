@@ -13,11 +13,14 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from adaptive_resampling.v3_dataset import DEFAULT_ROOT, AdaptiveResamplingDataset
+from adaptive_resampling.v3_dataset import DEFAULT_ROOT, AdaptiveResamplingDataset, OfficialPU1KDataset
 from adaptive_resampling.v3_metrics import evaluate_sample
 
 
-def evaluate(path, root, split, condition, output, *, coordinates="model", p2f=False, allow_subset=False):
+def evaluate(path, root, split, condition, output, *, coordinates="model", p2f=False, allow_subset=False,
+             modelnet40_objects_per_class=None):
+    if modelnet40_objects_per_class is not None and split != "modelnet40_holdout":
+        raise ValueError("--modelnet40-objects-per-class requires --split modelnet40_holdout")
     with np.load(path, allow_pickle=False) as archive:
         ids = archive["sample_id"].astype(str)
         predictions = archive["prediction_xyz"]
@@ -32,7 +35,12 @@ def evaluate(path, root, split, condition, output, *, coordinates="model", p2f=F
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         dataset = module.ModelNet40HoldoutDataset(root, condition, include_supervision=True,
-                                                 include_reference_metadata=p2f)
+                                                 include_reference_metadata=p2f,
+                                                 objects_per_class=modelnet40_objects_per_class)
+    elif split == "official":
+        if condition != "official_A0":
+            raise ValueError("PU1K official evaluation requires --condition official_A0")
+        dataset = OfficialPU1KDataset(root, include_reference_metadata=p2f)
     else:
         dataset = AdaptiveResamplingDataset(root, split, condition=condition, include_supervision=True,
                                             include_reference_metadata=p2f)
@@ -51,7 +59,8 @@ def evaluate(path, root, split, condition, output, *, coordinates="model", p2f=F
             if len(rows) % 100 == 0:
                 print(f"Evaluated {len(rows)} predictions", flush=True)
     finally:
-        dataset.close()
+        if hasattr(dataset, "close"):
+            dataset.close()
     if seen != set(positions):
         raise ValueError("Prediction file includes IDs outside the requested split/condition")
     if not rows:
@@ -91,6 +100,8 @@ def evaluate(path, root, split, condition, output, *, coordinates="model", p2f=F
                "partial_debug_evaluation": allow_subset, "prediction_coordinates": coordinates,
                "aggregation": "mean patches within each object, then mean over objects",
                "metrics": intervals}
+    if modelnet40_objects_per_class is not None:
+        summary["modelnet40_objects_per_class"] = modelnet40_objects_per_class
     (destination / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
 
@@ -100,8 +111,10 @@ if __name__ == "__main__":
     parser.add_argument("predictions")
     parser.add_argument("--root", default=str(DEFAULT_ROOT))
     parser.add_argument("--split", choices=["validation", "pu1k_patch", "modelnet40_patch",
-                                            "modelnet40_holdout", "pu1k_object"], required=True)
+                                            "modelnet40_holdout", "pu1k_object", "official"], required=True)
     parser.add_argument("--condition", required=True)
+    parser.add_argument("--modelnet40-objects-per-class", type=int,
+                        help="Evaluate the fixed number of ModelNet40 holdout objects per class")
     parser.add_argument("--output", required=True)
     parser.add_argument("--coordinates", choices=["model", "canonical", "raw"], default="model")
     parser.add_argument("--p2f", action="store_true")
@@ -109,5 +122,6 @@ if __name__ == "__main__":
     arguments = parser.parse_args()
     result = evaluate(arguments.predictions, arguments.root, arguments.split, arguments.condition,
                       arguments.output, coordinates=arguments.coordinates, p2f=arguments.p2f,
-                      allow_subset=arguments.allow_subset)
+                      allow_subset=arguments.allow_subset,
+                      modelnet40_objects_per_class=arguments.modelnet40_objects_per_class)
     print(json.dumps({key: value for key, value in result.items() if key != "metrics"}, ensure_ascii=False, indent=2))
