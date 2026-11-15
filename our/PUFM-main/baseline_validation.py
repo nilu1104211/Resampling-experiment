@@ -157,7 +157,9 @@ class BaselineValidation:
                 raise ValueError("Resume must use the same clean-validation data and protocol")
             if saved["epoch"] == self.best["epoch"]:
                 # Repair a crash after last.pt was saved but before best.pt was written.
-                atomic_save(saved, best_path)
+                previous = torch.load(best_path, map_location="cpu", weights_only=False) if best_path.is_file() else None
+                if previous is None or previous.get("best_validation") != self.best or previous.get("epoch") != self.best["epoch"]:
+                    atomic_save(saved, best_path)
             else:
                 if not best_path.is_file():
                     raise FileNotFoundError("Resume requires the previous best.pt alongside last.pt")
