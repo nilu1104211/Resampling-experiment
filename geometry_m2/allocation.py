@@ -3,8 +3,28 @@ import torch
 from models.adaptive_ops import assign_regions, fps_ids, gather, knn
 
 
+CANDIDATE_POLICY = "unique local32 pair midpoints; local segment subdivision on capacity shortfall; nearest centre; nested FPS prefixes"
+
+
+def subdivided_candidates(points, centers, index, existing):
+    """Find extra points on observed segments next to a sparse centre."""
+    center = centers[index]
+    distinct = torch.unique(points, dim=0)
+    distances = (distinct - center).square().sum(-1)
+    neighbors = distinct[distances.masked_fill(distances == 0, torch.inf).argsort(stable=True)[:8]]
+    # Dyadic intervals below the first midpoint favour the centre's own cell.
+    fractions = torch.arange(1, 128, dtype=points.dtype, device=points.device) / 256
+    extra = torch.lerp(center, neighbors[:, None], fractions[None, :, None]).reshape(-1, 3)
+    extra = torch.unique(extra, dim=0)
+    owner = assign_regions(extra[None], centers[None])[0]
+    extra = extra[owner == index]
+    occupied = torch.cat((points, existing))
+    distance = torch.cdist(extra[None], occupied[None], compute_mode="donot_use_mm_for_euclid_dist")[0]
+    return extra[distance.amin(-1) > 1e-7]
+
+
 @torch.no_grad()
-def candidate_pools(points, region, capacity=64):
+def candidate_pools(points, region, capacity, *, minimum, total):
     centers = region["centers"]
     # Local unordered pairs avoid duplicate (a,b)/(b,a) candidates. Ownership is
     # assigned once globally, including when overlapping neighbourhoods share pairs.
@@ -19,20 +39,31 @@ def candidate_pools(points, region, capacity=64):
         candidates = torch.unique(candidates, dim=0)
         # Input anchors already occupy these sites.
         candidates = candidates[torch.cdist(candidates[None], points[batch:batch+1])[0].amin(-1) > 1e-7]
-        owner = assign_regions(candidates[None], centers[batch:batch+1])[0]
+        owner = (assign_regions(candidates[None], centers[batch:batch+1])[0]
+                 if len(candidates) else endpoints.new_empty(0))
+        counts = owner.bincount(minlength=centers.shape[1]).clamp_max(capacity)
+        # Preserve the ordinary midpoint prefix. If filling each lower bound
+        # still leaves a total shortfall, replenish within the existing caps.
+        required = capacity if int(counts.clamp_min(minimum).sum()) < total else minimum
         for index in range(centers.shape[1]):
             local = candidates[owner == index]
             count = min(capacity, len(local))
-            capacities[batch, index] = count
             if count:
                 pools[batch, index, :count] = gather(local[None], fps_ids(local[None], count))[0]
+            if count < required:
+                extra = subdivided_candidates(points[batch], centers[batch], index, local)
+                added = min(required - count, len(extra))
+                if added:
+                    pools[batch, index, count:count+added] = gather(extra[None], fps_ids(extra[None], added))[0]
+                    count += added
+            capacities[batch, index] = count
     return pools, capacities
 
 
 @torch.no_grad()
 def quota(weights, total, minimum, capacities):
     if (capacities < minimum).any() or (capacities.sum(-1) < total).any() or weights.shape[1] * minimum > total:
-        raise ValueError("Insufficient unique midpoint capacity for fixed budget and lower bound")
+        raise ValueError("Insufficient unique candidate capacity for fixed budget and lower bound")
     result = torch.full_like(capacities, minimum)
     for batch in range(len(result)):
         while int(result[batch].sum()) < total:

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from models.adaptive_ops import cd_l1, region_counts
-from geometry_m2.allocation import allocate, initialize
+from geometry_m2.allocation import CANDIDATE_POLICY, allocate, initialize
 from geometry_m2.geometry_features import geometry_feature
 from baseline_validation import atomic_save, digest_file
 
@@ -51,7 +51,7 @@ def build_teacher(model, dataset, args):
     protocol = dict(version=1, split="train", source_sha256=args.source_sha256,
                     generator_sha256=generator_signature(model), code_sha256=code_signature(),
                     config={k: v for k, v in asdict(model.config).items() if k != "mode"},
-                    candidate_policy="unique local32 pair midpoints; nearest centre; nested FPS prefixes",
+                    candidate_policy=CANDIDATE_POLICY,
                     metric="0.5 * (mean pred-to-GT L2 + mean GT-to-pred L2), input-normalized",
                     indices=indices, augmentation_epoch=0, pairs=args.teacher_pairs,
                     shard_size=args.teacher_batch_size, seed=args.seed,

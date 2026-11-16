@@ -71,10 +71,12 @@ class SingleM2PUFM(nn.Module):
 
     def encode(self, points, output_size=None, *, with_m2=True):
         output_size = output_size or points.shape[1] * 4
+        total = output_size - points.shape[1]
         region = local_regions(points, self.config.regions)
-        pools, capacities = candidate_pools(points, region, self.config.capacity)
+        pools, capacities = candidate_pools(points, region, self.config.capacity,
+                                            minimum=self.config.minimum, total=total)
         state = dict(input=points, regions=region, pools=pools, capacities=capacities,
-                     total=output_size-points.shape[1], output_size=output_size,
+                     total=total, output_size=output_size,
                      condition_features=self.local_encoder(region["relative"]))
         if with_m2:
             state["features"], state["scalar"], state["valid"] = self.m2(region, self.config.mode, points.shape[1])

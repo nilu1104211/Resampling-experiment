@@ -15,7 +15,7 @@ sys.path.insert(1, str(ROOT.parent))
 import torch
 from torch import nn
 from geometry_m2.geometry_features import geometry_feature, local_regions
-from geometry_m2.allocation import allocate, initialize, quota
+from geometry_m2.allocation import allocate, candidate_pools, initialize, quota
 from geometry_m2.single_m2 import Config, SingleM2PUFM
 from geometry_m2.training import gain_objective, create_model
 from geometry_m2.teacher import generator_signature, build_teacher
@@ -97,6 +97,32 @@ class Contracts(unittest.TestCase):
         loss.backward()
         self.assertGreater(sum(float(p.grad.abs().sum()) for p in model.m2.parameters() if p.grad is not None), 0)
         self.assertTrue(all(p.grad is None for p in model.flow.parameters()))
+
+    def test_sparse_region_replenishes_unique_candidates(self):
+        points = self.points[:1].clone()
+        points[0, -3:] = torch.tensor([[3., 0., 0.], [10., 0., 0.], [10., .1, 0.]])
+        model = self.model()
+        region = local_regions(points)
+        midpoint_pools, midpoint_caps = candidate_pools(points, region, 64, minimum=0, total=768)
+        sparse = midpoint_caps[0] < 4
+        self.assertTrue(sparse.any())
+        state = model.encode(points)
+        expected = midpoint_caps.clamp_min(4)
+        self.assertTrue(torch.equal(state["capacities"], expected))
+        for index in range(16):
+            count = int(midpoint_caps[0, index])
+            torch.testing.assert_close(state["pools"][0, index, :count], midpoint_pools[0, index, :count])
+        budget = allocate(model, state, "uniform")
+        cloud = initialize(state, budget, 4)["initial"]
+        self.assertEqual(len(torch.unique(cloud[0], dim=0)), 1024)
+        owners = torch.arange(16).repeat_interleave(budget[0])
+        distances = torch.cdist(cloud[:, 256:], region["centers"], compute_mode="donot_use_mm_for_euclid_dist")[0]
+        torch.testing.assert_close(distances.gather(1, owners[:, None]).squeeze(1), distances.amin(1), atol=1e-6, rtol=0)
+
+        # The same isolated region also forces the global-shortfall branch
+        # when the requested total reaches the sum of all upper bounds.
+        _, full_caps = candidate_pools(points, region, 64, minimum=4, total=1024)
+        self.assertTrue(torch.equal(full_caps, torch.full_like(full_caps, 64)))
 
     def test_current_initial_matching_condition_gradient_and_repeat(self):
         model = self.model()
