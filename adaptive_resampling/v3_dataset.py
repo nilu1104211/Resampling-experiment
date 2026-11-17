@@ -281,6 +281,9 @@ class OfficialPU1KDataset:
     def __len__(self):
         return len(self.entries)
 
+    def close(self):
+        """Each XYZ file is opened and closed in __getitem__."""
+
     def __getitem__(self, index):
         entry = self.entries[index]
         input_path = self.source_paths.resolve(entry["input_path"])
